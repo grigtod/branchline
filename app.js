@@ -1821,6 +1821,8 @@ function renderCompactionIntoMarkdown(container, compaction) {
     return;
   }
 
+  markCompactionAffectedMarkdownBlocks(textNodes);
+
   const button = document.createElement("button");
   button.type = "button";
   button.className = "compact-inline-button";
@@ -1835,8 +1837,16 @@ function renderCompactionIntoMarkdown(container, compaction) {
 
 function refreshCompactOnlyMarkdownBlocks(container) {
   container.querySelectorAll(".md-list-item, .md-blockquote").forEach((block) => {
+    const wasAffectedByCompaction = block.dataset.compactionAffected === "true";
     const hasCompactButton = Boolean(block.querySelector("button[data-compaction-toggle]"));
-    block.classList.toggle("is-compact-only", hasCompactButton && isCompactOnlyContent(block));
+    const isCompactOnly = wasAffectedByCompaction && isCompactOnlyContent(block);
+
+    block.classList.toggle("is-compact-only", isCompactOnly);
+    block.classList.toggle("is-compact-collapsed", isCompactOnly && !hasCompactButton);
+  });
+
+  container.querySelectorAll(".md-list").forEach((list) => {
+    collapseCompactedMarkdownListItems(list);
   });
 }
 
@@ -1855,6 +1865,31 @@ function isCompactOnlyContent(node) {
     }
 
     return isCompactOnlyContent(child);
+  });
+}
+
+function markCompactionAffectedMarkdownBlocks(textNodes) {
+  textNodes.forEach((node) => {
+    const parentBlock = node.parentElement?.closest(".md-list-item, .md-blockquote");
+    if (parentBlock) {
+      parentBlock.dataset.compactionAffected = "true";
+    }
+  });
+}
+
+function collapseCompactedMarkdownListItems(list) {
+  const visibleItems = Array.from(list.children).filter(
+    (child) =>
+      child.classList.contains("md-list-item") && !child.classList.contains("is-compact-collapsed"),
+  );
+
+  list.replaceChildren();
+
+  visibleItems.forEach((item, index) => {
+    if (index > 0) {
+      list.appendChild(document.createTextNode("\n"));
+    }
+    list.appendChild(item);
   });
 }
 

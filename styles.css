@@ -942,6 +942,10 @@ button {
   content: none;
 }
 
+.md-list-item.is-compact-collapsed {
+  display: none;
+}
+
 .md-blockquote {
   padding: 0.15rem 0 0.15rem 1rem;
   border-left: 3px solid rgba(12, 122, 105, 0.24);
