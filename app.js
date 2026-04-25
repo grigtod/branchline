@@ -19,11 +19,6 @@ const MODEL_PRICING = {
   "gpt-4.1-mini": { input: 0.4, output: 1.6 },
   "gpt-4.1-nano": { input: 0.1, output: 0.4 },
 };
-const SELECTION_ACTION_TOASTS = {
-  debate: "Debate is coming soon.",
-  analyse: "Analyse is coming soon.",
-  bookmark: "Bookmark is coming soon.",
-};
 
 const dom = {
   landingPage: document.getElementById("landing-page"),
@@ -65,6 +60,7 @@ const dom = {
 const ui = {
   appEntered: !ENABLE_LANDING_PAGE,
   pendingScopes: new Set(),
+  pendingAnalyses: new Set(),
   selection: null,
   settingsOpen: false,
   favoritesOpen: false,
@@ -273,6 +269,23 @@ function handleChatViewClick(event) {
     if (message) {
       message.compactions = (message.compactions || []).filter(
         (compaction) => compaction.id !== compactToggle.dataset.compactionToggle,
+      );
+      touchConversation(conversation);
+      saveState();
+      render();
+    }
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  const removeAnalysisButton = event.target.closest("[data-remove-analysis-id]");
+  if (removeAnalysisButton) {
+    const messageElement = removeAnalysisButton.closest(".message");
+    const message = messageElement ? findMessageById(conversation.messages, messageElement.dataset.messageId) : null;
+    if (message) {
+      message.analyses = (message.analyses || []).filter(
+        (analysis) => analysis.id !== removeAnalysisButton.dataset.removeAnalysisId,
       );
       touchConversation(conversation);
       saveState();
@@ -604,6 +617,70 @@ async function handleSelectionCompactAction() {
   clearSelectionMenu();
 }
 
+async function handleSelectionDebateAction() {
+  if (!ui.selection) {
+    return;
+  }
+
+  const conversation = getActiveConversation();
+  if (!conversation) {
+    clearSelectionMenu();
+    return;
+  }
+
+  if (!state.settings.apiKey) {
+    showToast("Add your OpenAI API key in Settings first so Branchline can reach the model.");
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  const selection = { ...ui.selection };
+  const message = findMessageById(conversation.messages, selection.messageId);
+  if (!message) {
+    clearSelectionMenu();
+    return;
+  }
+
+  const overlappingThread = findOverlappingThread(message.threads || [], selection.startOffset, selection.endOffset);
+  if (overlappingThread) {
+    if (overlappingThread.kind === "debate" && isSameAnchor(overlappingThread, selection.startOffset, selection.endOffset, selection.selectedText)) {
+      overlappingThread.collapsed = false;
+      ui.pendingScrollThreadId = overlappingThread.id;
+      saveState();
+      render();
+    } else {
+      showToast("That span already belongs to another thread. Pick a fresh excerpt or continue inside the existing thread.");
+    }
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  const thread = createThread({
+    anchorText: selection.selectedText,
+    anchorMessageId: message.id,
+    startOffset: selection.startOffset,
+    endOffset: selection.endOffset,
+    kind: "debate",
+  });
+
+  message.threads = message.threads || [];
+  message.threads.push(thread);
+  touchConversation(conversation);
+  ui.pendingScrollThreadId = thread.id;
+  saveState();
+  render();
+  clearNativeSelection();
+  clearSelectionMenu();
+
+  await runAutomatedThreadReply(
+    conversation,
+    [...selection.threadPath, thread.id],
+    buildInitialDebatePrompt(thread.anchorText),
+  );
+}
+
 async function handleSelectionBookmarkAction() {
   if (!ui.selection) {
     return;
@@ -665,6 +742,95 @@ async function handleSelectionBookmarkAction() {
   clearSelectionMenu();
 }
 
+async function handleSelectionAnalyseAction() {
+  if (!ui.selection) {
+    return;
+  }
+
+  const lensInput = window.prompt("What do you want to analyse in this text?", "");
+  if (lensInput === null) {
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  const analysisPrompt = lensInput.trim();
+  if (!analysisPrompt) {
+    showToast("Add an analysis prompt first.");
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  const conversation = getActiveConversation();
+  if (!conversation) {
+    clearSelectionMenu();
+    return;
+  }
+
+  if (!state.settings.apiKey) {
+    showToast("Add your OpenAI API key in Settings first so Branchline can reach the model.");
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  const selection = { ...ui.selection };
+  const message = findMessageById(conversation.messages, selection.messageId);
+  if (!message) {
+    clearSelectionMenu();
+    return;
+  }
+
+  if (findOverlappingAnalysis(message.analyses || [], selection.startOffset, selection.endOffset)) {
+    showToast("Remove the current analysis highlight on this span before running a new one.");
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  const analysisScopeKey = makeAnalysisScopeKey(conversation.id, message.id);
+  if (ui.pendingAnalyses.has(analysisScopeKey)) {
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  ui.pendingAnalyses.add(analysisScopeKey);
+  clearNativeSelection();
+  clearSelectionMenu();
+  render();
+
+  try {
+    const segments = await requestSelectionAnalysis(selection.selectedText, analysisPrompt, selection.startOffset);
+    if (!segments.length) {
+      showToast(`No strong matches found for "${truncate(normalizeWhitespace(analysisPrompt), 36)}".`);
+      return;
+    }
+
+    message.analyses = message.analyses || [];
+    message.analyses.push(
+      createAnalysis({
+        prompt: analysisPrompt,
+        selectedText: selection.selectedText,
+        startOffset: selection.startOffset,
+        endOffset: selection.endOffset,
+        segments,
+      }),
+    );
+    touchConversation(conversation);
+    saveState();
+    render();
+    showToast(`Applied "${truncate(normalizeWhitespace(analysisPrompt), 28)}" analysis.`);
+  } catch (error) {
+    showToast(error.message || "The analysis request failed.");
+  } finally {
+    ui.pendingAnalyses.delete(analysisScopeKey);
+    saveState();
+    render();
+  }
+}
+
 async function handleSelectionMenuClick(event) {
   const button = event.target.closest("[data-selection-action]");
   if (!button) {
@@ -688,14 +854,19 @@ async function handleSelectionMenuClick(event) {
     return;
   }
 
-  if (selectionAction === "bookmark") {
-    await handleSelectionBookmarkAction();
+  if (selectionAction === "debate") {
+    await handleSelectionDebateAction();
     return;
   }
 
-  const toastMessage = SELECTION_ACTION_TOASTS[selectionAction];
-  if (toastMessage) {
-    showToast(toastMessage);
+  if (selectionAction === "analyse") {
+    await handleSelectionAnalyseAction();
+    return;
+  }
+
+  if (selectionAction === "bookmark") {
+    await handleSelectionBookmarkAction();
+    return;
   }
 
   clearNativeSelection();
@@ -756,6 +927,37 @@ async function submitPrompt(threadPath) {
   }
 }
 
+async function runAutomatedThreadReply(conversation, threadPath, instruction) {
+  const scope = getScopeTarget(conversation, threadPath);
+  if (!scope || !instruction || !state.settings.apiKey) {
+    return;
+  }
+
+  const scopeKey = makeScopeKey(conversation.id, threadPath);
+  if (ui.pendingScopes.has(scopeKey)) {
+    return;
+  }
+
+  ui.pendingScopes.add(scopeKey);
+  saveState();
+  render();
+
+  try {
+    const input = buildApiInput(conversation, threadPath, {
+      supplementalUserPrompt: instruction,
+    });
+    const output = await requestAssistantReply(input);
+    scope.messages.push(createMessage("assistant", output));
+    touchConversation(conversation);
+  } catch (error) {
+    showToast(error.message || "The request failed.");
+  } finally {
+    ui.pendingScopes.delete(scopeKey);
+    saveState();
+    render();
+  }
+}
+
 async function requestAssistantReply(input) {
   const model = state.settings.model || DEFAULT_MODELS[0];
   const body = {
@@ -792,7 +994,16 @@ async function requestAssistantReply(input) {
   return text.trim();
 }
 
-function buildApiInput(conversation, threadPath) {
+async function requestAssistantJson(input, failureMessage) {
+  const text = await requestAssistantReply(input);
+  const parsed = parseJsonResponse(text);
+  if (parsed === null) {
+    throw new Error(failureMessage || "The model returned an invalid JSON response.");
+  }
+  return parsed;
+}
+
+function buildApiInput(conversation, threadPath, options = {}) {
   const input = [
     {
       role: "system",
@@ -812,17 +1023,85 @@ function buildApiInput(conversation, threadPath) {
       content: [
         {
           type: "input_text",
-          text:
-            `Thread focus ${index + 1}: the user opened a side discussion about this excerpt from an earlier assistant reply:\n"""` +
-            `\n${thread.anchorText}\n"""` +
-            "\nStay grounded in the full main conversation while focusing on this passage and the thread that follows.",
+          text: buildThreadFocusPrompt(thread, index),
         },
       ],
     });
     appendMessageListToInput(input, thread.messages);
   });
 
+  if (typeof options.supplementalUserPrompt === "string" && options.supplementalUserPrompt.trim()) {
+    input.push({
+      role: "user",
+      content: [{ type: "input_text", text: options.supplementalUserPrompt.trim() }],
+    });
+  }
+
   return input;
+}
+
+function buildThreadFocusPrompt(thread, index) {
+  const focusIntro =
+    `Thread focus ${index + 1}: the user opened a side discussion about this excerpt from an earlier assistant reply:\n"""` +
+    `\n${thread.anchorText}\n"""`;
+
+  if (thread.kind === "debate") {
+    return (
+      `${focusIntro}\n` +
+      "This is a debate thread. Take a rigorous contrarian stance toward the excerpt and stress-test its reasoning. " +
+      "Explain where it may be false, overstated, misleading, manipulative, incomplete, or unsupported. " +
+      "Give concrete objections, note uncertainty when needed, and prefer honesty over performative disagreement."
+    );
+  }
+
+  return `${focusIntro}\nStay grounded in the full main conversation while focusing on this passage and the thread that follows.`;
+}
+
+function buildInitialDebatePrompt(selectedText) {
+  return (
+    "Start a debate about the selected excerpt below.\n\n" +
+    `Excerpt:\n"""\n${selectedText}\n"""\n\n` +
+    "Give the strongest contrarian reading you can. Focus on reasons the excerpt may be false, misleading, manipulative, incomplete, poorly supported, or rhetorically slanted. " +
+    "Use concise paragraphs and concrete reasoning."
+  );
+}
+
+function buildAnalysisRequestInput(selectedText, analysisPrompt) {
+  return [
+    {
+      role: "system",
+      content: [
+        {
+          type: "input_text",
+          text:
+            "You are a text analysis engine. Return JSON only. " +
+            'Analyze the excerpt using the requested lens and return {"segments":[{"start":number,"end":number,"score":number,"reason":string}]}. ' +
+            "Offsets must be exact character offsets relative to the excerpt, spans must be non-overlapping, highlights must stay tight to the exact words that show the target trait, and score must be between 0 and 1. " +
+            "Return an empty segments array if nothing matches clearly.",
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text:
+            `Analysis lens: ${analysisPrompt}\n\n` +
+            `Excerpt:\n"""\n${selectedText}\n"""\n\n` +
+            "Return only JSON.",
+        },
+      ],
+    },
+  ];
+}
+
+async function requestSelectionAnalysis(selectedText, analysisPrompt, baseOffset) {
+  const parsed = await requestAssistantJson(
+    buildAnalysisRequestInput(selectedText, analysisPrompt),
+    "The model returned analysis data in an unexpected format.",
+  );
+  return normalizeAnalysisSegments(parsed, selectedText, baseOffset);
 }
 
 function appendMessageListToInput(target, messages) {
@@ -1234,6 +1513,11 @@ function renderMessage(message, threadPath) {
 
   meta.append(role, time);
 
+  const analysisActions = renderMessageAnalysisActions(message);
+  if (analysisActions) {
+    meta.appendChild(analysisActions);
+  }
+
   const body = document.createElement("div");
   body.className = "message-text";
   body.dataset.messageId = message.id;
@@ -1247,10 +1531,11 @@ function renderMessage(message, threadPath) {
         threadPath,
         message.compactions || [],
         getMessageFavorites(getActiveConversation()?.id, message.id),
+        message.analyses || [],
       ),
     );
   } else {
-    body.appendChild(buildFormattedTextFragment(message.content, [], threadPath, message.compactions || [], []));
+    body.appendChild(buildFormattedTextFragment(message.content, [], threadPath, message.compactions || [], [], []));
   }
 
   shell.append(meta, body);
@@ -1259,17 +1544,58 @@ function renderMessage(message, threadPath) {
   return wrapper;
 }
 
+function renderMessageAnalysisActions(message) {
+  const conversation = getActiveConversation();
+  if (!conversation) {
+    return null;
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "message-meta-actions";
+
+  const analyses = message.analyses || [];
+  analyses.forEach((analysis) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "message-analysis-chip";
+    button.dataset.removeAnalysisId = analysis.id;
+    button.dataset.tooltip = `Remove "${truncate(normalizeWhitespace(analysis.prompt), 28)}" analysis`;
+    button.setAttribute("aria-label", `Remove ${analysis.prompt} analysis`);
+
+    const label = document.createElement("span");
+    label.className = "message-analysis-chip-label";
+    label.textContent = truncate(normalizeWhitespace(analysis.prompt), 24);
+
+    const close = document.createElement("span");
+    close.className = "message-analysis-chip-close";
+    close.setAttribute("aria-hidden", "true");
+    close.textContent = "x";
+
+    button.append(label, close);
+    actions.appendChild(button);
+  });
+
+  if (ui.pendingAnalyses.has(makeAnalysisScopeKey(conversation.id, message.id))) {
+    const status = document.createElement("span");
+    status.className = "message-analysis-status";
+    status.textContent = "Analysing...";
+    actions.appendChild(status);
+  }
+
+  return actions.childNodes.length ? actions : null;
+}
+
 function renderThread(thread, threadPath) {
   const section = document.createElement("section");
-  section.className = "thread-card inline-thread";
+  section.className = `thread-card inline-thread ${thread.kind === "debate" ? "thread-card--debate" : ""}`.trim();
   section.id = `thread-${thread.id}`;
 
   const header = document.createElement("div");
   header.className = "thread-header";
 
   const label = document.createElement("span");
-  label.className = "thread-label";
-  label.textContent = "Focused thread";
+  label.className = `thread-label ${thread.kind === "debate" ? "thread-label--debate" : ""}`.trim();
+  label.textContent = thread.kind === "debate" ? "Debate thread" : "Focused thread";
 
   const context = document.createElement("div");
   context.className = "thread-context";
@@ -1304,15 +1630,20 @@ function renderThread(thread, threadPath) {
 
   if (thread.messages.length === 0) {
     const empty = document.createElement("div");
-    empty.className = "thread-empty";
-    empty.textContent = "Ask about this excerpt to start the branch.";
+    empty.className = `thread-empty ${thread.kind === "debate" ? "thread-empty--debate" : ""}`.trim();
+    empty.textContent =
+      thread.kind === "debate"
+        ? "Branchline is building the contrarian case for this excerpt. Keep pulling on the thread once it lands."
+        : "Ask about this excerpt to start the branch.";
     body.appendChild(empty);
   } else {
     body.appendChild(renderMessageList(thread.messages, threadPath));
   }
 
   if (ui.pendingScopes.has(makeScopeKey(getActiveConversation().id, threadPath))) {
-    body.appendChild(renderTypingIndicator("Thinking inside this branch"));
+    body.appendChild(
+      renderTypingIndicator(thread.kind === "debate" ? "Building the contrarian case" : "Thinking inside this branch"),
+    );
   }
 
   body.appendChild(renderThreadComposer(thread, threadPath));
@@ -1328,7 +1659,8 @@ function renderThreadComposer(thread, threadPath) {
 
   const textarea = document.createElement("textarea");
   textarea.rows = 1;
-  textarea.placeholder = "Talk about this section...";
+  textarea.placeholder =
+    thread.kind === "debate" ? "Challenge the argument, ask for evidence, or test the reasoning..." : "Talk about this section...";
   textarea.value = thread.draft || "";
   textarea.dataset.threadId = thread.id;
   textarea.disabled = ui.pendingScopes.has(makeScopeKey(getActiveConversation().id, threadPath));
@@ -1492,13 +1824,14 @@ function autosizeTextarea(textarea) {
   textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
 }
 
-function buildFormattedTextFragment(text, threads, threadPath = [], compactions = [], favorites = []) {
+function buildFormattedTextFragment(text, threads, threadPath = [], compactions = [], favorites = [], analyses = []) {
   const container = document.createElement("div");
   container.className = "markdown-content";
   container.appendChild(buildMarkdownFragment(text));
 
   applyInlineDecorations(container, threads, threadPath, compactions, favorites);
   refreshCompactOnlyMarkdownBlocks(container);
+  applyAnalysisDecorations(container, analyses);
 
   const fragment = document.createDocumentFragment();
   while (container.firstChild) {
@@ -1766,6 +2099,22 @@ function applyInlineDecorations(container, threads, threadPath, compactions = []
   });
 }
 
+function applyAnalysisDecorations(container, analyses = []) {
+  const segments = (analyses || [])
+    .flatMap((analysis) =>
+      (analysis.segments || []).map((segment) => ({
+        ...segment,
+        analysisId: analysis.id,
+        prompt: analysis.prompt,
+      })),
+    )
+    .sort((a, b) => b.startOffset - a.startOffset || b.endOffset - a.endOffset);
+
+  segments.forEach((segment) => {
+    renderAnalysisSegmentIntoMarkdown(container, segment);
+  });
+}
+
 function renderFavoriteIntoMarkdown(container, favorite) {
   const start = locateRenderableTextPosition(container, favorite.startOffset, "start");
   const end = locateRenderableTextPosition(container, favorite.endOffset, "end");
@@ -1893,6 +2242,34 @@ function collapseCompactedMarkdownListItems(list) {
   });
 }
 
+function renderAnalysisSegmentIntoMarkdown(container, segment) {
+  const start = locateRenderableTextPosition(container, segment.startOffset, "start");
+  const end = locateRenderableTextPosition(container, segment.endOffset, "end");
+  if (!start || !end) {
+    return;
+  }
+
+  const isolated = isolateRenderableTextRange(start, end);
+  if (!isolated) {
+    return;
+  }
+
+  const textNodes = collectRenderableTextNodes(container, isolated.startNode, isolated.endNode);
+  if (!textNodes.length) {
+    return;
+  }
+
+  textNodes.forEach((node) => {
+    const mark = document.createElement("span");
+    mark.className = "analysis-highlight";
+    mark.dataset.analysisId = segment.analysisId;
+    mark.dataset.analysisPrompt = segment.prompt;
+    mark.style.setProperty("--analysis-strength", clamp(segment.score, 0.12, 1).toFixed(2));
+    mark.textContent = node.data;
+    node.replaceWith(mark);
+  });
+}
+
 function renderThreadAnchorIntoMarkdown(container, thread, threadPath) {
   const start = locateRenderableTextPosition(container, thread.startOffset, "start");
   const end = locateRenderableTextPosition(container, thread.endOffset, "end");
@@ -1913,7 +2290,13 @@ function renderThreadAnchorIntoMarkdown(container, thread, threadPath) {
   let lastMark = null;
   textNodes.forEach((node) => {
     const mark = document.createElement("mark");
-    mark.className = `anchor-highlight ${thread.collapsed ? "is-collapsed" : "is-open"}`;
+    mark.className = [
+      "anchor-highlight",
+      thread.collapsed ? "is-collapsed" : "is-open",
+      thread.kind === "debate" ? "anchor-highlight--debate" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
     mark.dataset.threadId = thread.id;
     mark.dataset.threadGenerated = "true";
     mark.title = thread.collapsed ? "Open focused thread" : "Close focused thread";
@@ -1928,7 +2311,9 @@ function renderThreadAnchorIntoMarkdown(container, thread, threadPath) {
 
   const toggle = document.createElement("button");
   toggle.type = "button";
-  toggle.className = "thread-toggle thread-inline-toggle";
+  toggle.className = ["thread-toggle", "thread-inline-toggle", thread.kind === "debate" ? "thread-inline-toggle--debate" : ""]
+    .filter(Boolean)
+    .join(" ");
   toggle.dataset.threadToggle = thread.id;
   toggle.dataset.threadGenerated = "true";
   toggle.setAttribute("aria-expanded", String(!thread.collapsed));
@@ -2234,6 +2619,12 @@ function findOverlappingCompaction(compactions, startOffset, endOffset) {
   );
 }
 
+function findOverlappingAnalysis(analyses, startOffset, endOffset) {
+  return (analyses || []).find(
+    (analysis) => analysis.startOffset < endOffset && analysis.endOffset > startOffset,
+  );
+}
+
 function findOverlappingFavorite(favorites, startOffset, endOffset) {
   return (favorites || []).find(
     (favorite) => favorite.startOffset < endOffset && favorite.endOffset > startOffset,
@@ -2284,6 +2675,7 @@ function createMessage(role, content) {
     content,
     threads: [],
     compactions: [],
+    analyses: [],
     createdAt: new Date().toISOString(),
   };
 }
@@ -2294,13 +2686,14 @@ function getMessageFavorites(conversationId, messageId) {
   );
 }
 
-function createThread({ anchorText, anchorMessageId, startOffset, endOffset }) {
+function createThread({ anchorText, anchorMessageId, startOffset, endOffset, kind = "branch" }) {
   return {
     id: crypto.randomUUID(),
     anchorText,
     anchorMessageId,
     startOffset,
     endOffset,
+    kind,
     collapsed: false,
     messages: [],
     draft: "",
@@ -2315,6 +2708,18 @@ function createCompaction({ compactedText, startOffset, endOffset }) {
     compactedText,
     startOffset,
     endOffset,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function createAnalysis({ prompt, selectedText, startOffset, endOffset, segments }) {
+  return {
+    id: crypto.randomUUID(),
+    prompt,
+    selectedText,
+    startOffset,
+    endOffset,
+    segments,
     createdAt: new Date().toISOString(),
   };
 }
@@ -2424,6 +2829,10 @@ function makeScopeKey(conversationId, threadPath) {
   return `${conversationId}:${threadPath.join(">") || "root"}`;
 }
 
+function makeAnalysisScopeKey(conversationId, messageId) {
+  return `${conversationId}:analysis:${messageId}`;
+}
+
 function supportsReasoning(model) {
   return model.startsWith("gpt-5");
 }
@@ -2512,6 +2921,7 @@ function normalizeMessage(message) {
     content: typeof message.content === "string" ? message.content : "",
     threads: Array.isArray(message.threads) ? message.threads.map(normalizeThread) : [],
     compactions: Array.isArray(message.compactions) ? message.compactions.map(normalizeCompaction) : [],
+    analyses: Array.isArray(message.analyses) ? message.analyses.map(normalizeAnalysis) : [],
     createdAt: message.createdAt || new Date().toISOString(),
   };
 }
@@ -2523,6 +2933,7 @@ function normalizeThread(thread) {
     anchorMessageId: typeof thread.anchorMessageId === "string" ? thread.anchorMessageId : "",
     startOffset: Number.isInteger(thread.startOffset) ? thread.startOffset : 0,
     endOffset: Number.isInteger(thread.endOffset) ? thread.endOffset : 0,
+    kind: thread.kind === "debate" ? "debate" : "branch",
     collapsed: Boolean(thread.collapsed),
     messages: Array.isArray(thread.messages) ? thread.messages.map(normalizeMessage) : [],
     draft: typeof thread.draft === "string" ? thread.draft : "",
@@ -2538,6 +2949,18 @@ function normalizeCompaction(compaction) {
     startOffset: Number.isInteger(compaction.startOffset) ? compaction.startOffset : 0,
     endOffset: Number.isInteger(compaction.endOffset) ? compaction.endOffset : 0,
     createdAt: compaction.createdAt || new Date().toISOString(),
+  };
+}
+
+function normalizeAnalysis(analysis) {
+  return {
+    id: typeof analysis.id === "string" ? analysis.id : crypto.randomUUID(),
+    prompt: typeof analysis.prompt === "string" ? analysis.prompt : "",
+    selectedText: typeof analysis.selectedText === "string" ? analysis.selectedText : "",
+    startOffset: Number.isInteger(analysis.startOffset) ? analysis.startOffset : 0,
+    endOffset: Number.isInteger(analysis.endOffset) ? analysis.endOffset : 0,
+    segments: normalizeAnalysisSegments(analysis.segments, typeof analysis.selectedText === "string" ? analysis.selectedText : "", Number.isInteger(analysis.startOffset) ? analysis.startOffset : 0),
+    createdAt: analysis.createdAt || new Date().toISOString(),
   };
 }
 
@@ -2566,6 +2989,147 @@ function clearNativeSelection() {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+function normalizeAnalysisSegments(source, selectedText, baseOffset) {
+  const rawSegments = Array.isArray(source) ? source : Array.isArray(source?.segments) ? source.segments : [];
+  const result = [];
+  let lastEnd = -1;
+
+  rawSegments
+    .map((segment) => ({
+      start:
+        Number.isFinite(segment?.startOffset) && Number.isFinite(segment?.endOffset)
+          ? Math.floor(segment.startOffset - baseOffset)
+          : Number.isFinite(segment?.start)
+            ? Math.floor(segment.start)
+            : NaN,
+      end:
+        Number.isFinite(segment?.startOffset) && Number.isFinite(segment?.endOffset)
+          ? Math.floor(segment.endOffset - baseOffset)
+          : Number.isFinite(segment?.end)
+            ? Math.floor(segment.end)
+            : NaN,
+      score: Number.isFinite(segment?.score)
+        ? Number(segment.score)
+        : Number.isFinite(segment?.intensity)
+          ? Number(segment.intensity)
+          : Number.isFinite(segment?.strength)
+            ? Number(segment.strength)
+            : NaN,
+    }))
+    .sort((a, b) => a.start - b.start || a.end - b.end)
+    .forEach((segment) => {
+      if (!Number.isInteger(segment.start) || !Number.isInteger(segment.end)) {
+        return;
+      }
+
+      const boundedStart = clamp(segment.start, 0, selectedText.length);
+      const boundedEnd = clamp(segment.end, 0, selectedText.length);
+      if (boundedEnd <= boundedStart || boundedStart < lastEnd) {
+        return;
+      }
+
+      if (!selectedText.slice(boundedStart, boundedEnd).trim()) {
+        return;
+      }
+
+      result.push({
+        startOffset: baseOffset + boundedStart,
+        endOffset: baseOffset + boundedEnd,
+        score: clamp(Number.isFinite(segment.score) ? segment.score : 0.5, 0.08, 1),
+      });
+      lastEnd = boundedEnd;
+    });
+
+  return result;
+}
+
+function parseJsonResponse(text) {
+  const candidates = [text.trim()];
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+    candidates.push(fenced[1].trim());
+  }
+
+  const extracted = extractFirstJsonBlock(text);
+  if (extracted) {
+    candidates.push(extracted);
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+
+    try {
+      return JSON.parse(candidate);
+    } catch (error) {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+function extractFirstJsonBlock(text) {
+  let startIndex = -1;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === "{" || text[index] === "[") {
+      startIndex = index;
+      break;
+    }
+  }
+
+  if (startIndex < 0) {
+    return "";
+  }
+
+  const opener = text[startIndex];
+  const closer = opener === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let isEscaped = false;
+
+  for (let index = startIndex; index < text.length; index += 1) {
+    const character = text[index];
+
+    if (inString) {
+      if (isEscaped) {
+        isEscaped = false;
+        continue;
+      }
+
+      if (character === "\\") {
+        isEscaped = true;
+        continue;
+      }
+
+      if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (character === opener) {
+      depth += 1;
+      continue;
+    }
+
+    if (character === closer) {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(startIndex, index + 1);
+      }
+    }
+  }
+
+  return "";
 }
 
 function extractResponseText(data) {
