@@ -19,6 +19,12 @@ const MODEL_PRICING = {
   "gpt-4.1-mini": { input: 0.4, output: 1.6 },
   "gpt-4.1-nano": { input: 0.1, output: 0.4 },
 };
+const SELECTION_ACTION_TOASTS = {
+  compact: "Compact is coming soon.",
+  debate: "Debate is coming soon.",
+  analyse: "Analyse is coming soon.",
+  bookmark: "Bookmark is coming soon.",
+};
 
 const dom = {
   landingPage: document.getElementById("landing-page"),
@@ -48,8 +54,7 @@ const dom = {
   settingsPage: document.getElementById("settings-page"),
   settingsBackdrop: document.getElementById("settings-backdrop"),
   selectionMenu: document.getElementById("selection-menu"),
-  selectionThreadButton: document.getElementById("selection-thread-button"),
-  selectionDismissButton: document.getElementById("selection-dismiss-button"),
+  buttonTooltip: document.getElementById("button-tooltip"),
   toastRegion: document.getElementById("toast-region"),
 };
 
@@ -60,6 +65,7 @@ const ui = {
   settingsOpen: false,
   sidebarCollapsed: false,
   pendingScrollThreadId: null,
+  hoveredTooltipButton: null,
   toastTimers: [],
   toasts: [],
 };
@@ -94,14 +100,17 @@ function bindEvents() {
   dom.chatView.addEventListener("keydown", handleComposerKeydown);
   dom.chatView.addEventListener("submit", handleThreadSubmit);
   dom.settingsBackdrop.addEventListener("click", closeSettingsPage);
-  dom.selectionThreadButton.addEventListener("click", handleSelectionThreadAction);
-  dom.selectionDismissButton.addEventListener("click", clearSelectionMenu);
+  dom.selectionMenu.addEventListener("click", handleSelectionMenuClick);
   document.addEventListener("mouseup", handleSelectionCandidate);
   document.addEventListener("keyup", handleSelectionCandidate);
   document.addEventListener("mousedown", handleOutsidePointerDown);
+  document.addEventListener("mouseover", handleTooltipPointerEnter);
+  document.addEventListener("mouseout", handleTooltipPointerLeave);
+  document.addEventListener("focusin", handleTooltipFocusIn);
+  document.addEventListener("focusout", handleTooltipFocusOut);
   document.addEventListener("keydown", handleDocumentKeydown);
-  window.addEventListener("scroll", clearSelectionMenu, true);
-  window.addEventListener("resize", clearSelectionMenu);
+  window.addEventListener("scroll", handleGlobalViewportChange, true);
+  window.addEventListener("resize", handleGlobalViewportChange);
 }
 
 function handleNewChat() {
@@ -377,6 +386,57 @@ function handleOutsidePointerDown(event) {
   clearSelectionMenu();
 }
 
+function handleTooltipPointerEnter(event) {
+  const button = event.target.closest("button[data-tooltip]");
+  if (!button || button.disabled || !button.isConnected) {
+    return;
+  }
+
+  if (button.contains(event.relatedTarget)) {
+    return;
+  }
+
+  showButtonTooltip(button);
+}
+
+function handleTooltipPointerLeave(event) {
+  if (!ui.hoveredTooltipButton) {
+    return;
+  }
+
+  if (ui.hoveredTooltipButton.contains(event.relatedTarget)) {
+    return;
+  }
+
+  hideButtonTooltip();
+}
+
+function handleTooltipFocusIn(event) {
+  const button = event.target.closest("button[data-tooltip]");
+  if (!button || button.disabled || !button.isConnected) {
+    return;
+  }
+
+  showButtonTooltip(button);
+}
+
+function handleTooltipFocusOut(event) {
+  if (!ui.hoveredTooltipButton) {
+    return;
+  }
+
+  if (ui.hoveredTooltipButton.contains(event.relatedTarget)) {
+    return;
+  }
+
+  hideButtonTooltip();
+}
+
+function handleGlobalViewportChange() {
+  clearSelectionMenu();
+  hideButtonTooltip();
+}
+
 async function handleSelectionThreadAction() {
   if (!ui.selection) {
     return;
@@ -420,6 +480,33 @@ async function handleSelectionThreadAction() {
   ui.pendingScrollThreadId = thread.id;
   saveState();
   render();
+  clearNativeSelection();
+  clearSelectionMenu();
+}
+
+async function handleSelectionMenuClick(event) {
+  const button = event.target.closest("[data-selection-action]");
+  if (!button) {
+    return;
+  }
+
+  const { selectionAction } = button.dataset;
+  if (!selectionAction) {
+    return;
+  }
+
+  event.preventDefault();
+
+  if (selectionAction === "branch") {
+    await handleSelectionThreadAction();
+    return;
+  }
+
+  const toastMessage = SELECTION_ACTION_TOASTS[selectionAction];
+  if (toastMessage) {
+    showToast(toastMessage);
+  }
+
   clearNativeSelection();
   clearSelectionMenu();
 }
@@ -562,6 +649,7 @@ function appendMessageListToInput(target, messages) {
 }
 
 function render() {
+  hideButtonTooltip();
   renderAppFrame();
   renderLandingPage();
   renderSettings();
@@ -571,6 +659,7 @@ function render() {
   renderConversation();
   renderSelectionMenu();
   renderToasts();
+  syncButtonTooltips();
   autosizeAllTextareas();
   flushPendingScroll();
 }
@@ -995,12 +1084,73 @@ function renderSelectionMenu() {
   dom.selectionMenu.style.left = `${ui.selection.x}px`;
   dom.selectionMenu.style.top = `${ui.selection.y}px`;
   dom.selectionMenu.style.transform = "translate(-50%, -100%)";
-  dom.selectionThreadButton.textContent = ui.selection.action === "open" ? "Open thread" : "Talk about this";
 }
 
 function clearSelectionMenu() {
   ui.selection = null;
   renderSelectionMenu();
+}
+
+function syncButtonTooltips() {
+  document.querySelectorAll("button:not(.conversation-card)").forEach((button) => {
+    if (button.hasAttribute("data-no-tooltip")) {
+      button.removeAttribute("data-tooltip");
+      return;
+    }
+
+    const existingLabel = button.dataset.tooltip?.trim();
+    const titleLabel = button.getAttribute("title")?.trim();
+    const ariaLabel = button.getAttribute("aria-label")?.trim();
+    const textLabel = button.querySelector("img, .selection-action-glyph")
+      ? ""
+      : normalizeWhitespace(button.textContent || "");
+    const label = existingLabel || titleLabel || ariaLabel || textLabel;
+
+    if (!label) {
+      button.removeAttribute("data-tooltip");
+      return;
+    }
+
+    button.dataset.tooltip = label;
+    if (titleLabel) {
+      button.removeAttribute("title");
+    }
+  });
+
+  if (ui.hoveredTooltipButton && !ui.hoveredTooltipButton.isConnected) {
+    hideButtonTooltip();
+  }
+}
+
+function showButtonTooltip(button) {
+  const label = button.dataset.tooltip?.trim();
+  if (!label) {
+    return;
+  }
+
+  ui.hoveredTooltipButton = button;
+  dom.buttonTooltip.textContent = label;
+  dom.buttonTooltip.classList.remove("hidden");
+  dom.buttonTooltip.setAttribute("aria-hidden", "false");
+  updateButtonTooltipPosition(button);
+}
+
+function updateButtonTooltipPosition(button) {
+  const rect = button.getBoundingClientRect();
+  const tooltipWidth = dom.buttonTooltip.offsetWidth;
+  const tooltipHeight = dom.buttonTooltip.offsetHeight;
+  const left = clamp(rect.left + rect.width / 2, 16 + tooltipWidth / 2, window.innerWidth - 16 - tooltipWidth / 2);
+  const top = Math.max(rect.top - tooltipHeight - 12, 12);
+
+  dom.buttonTooltip.style.left = `${left}px`;
+  dom.buttonTooltip.style.top = `${top}px`;
+  dom.buttonTooltip.style.transform = "translateX(-50%) translateY(0)";
+}
+
+function hideButtonTooltip() {
+  ui.hoveredTooltipButton = null;
+  dom.buttonTooltip.classList.add("hidden");
+  dom.buttonTooltip.setAttribute("aria-hidden", "true");
 }
 
 function renderToasts() {
@@ -1052,51 +1202,18 @@ function autosizeTextarea(textarea) {
 }
 
 function buildFormattedTextFragment(text, threads, threadPath = []) {
+  const container = document.createElement("div");
+  container.className = "markdown-content";
+  container.appendChild(buildMarkdownFragment(text));
+
+  applyThreadAnchors(container, threads, threadPath);
+
   const fragment = document.createDocumentFragment();
-  const parts = parseSimpleMarkdown(text);
-  const anchors = buildRenderableAnchors(threads);
-  let cursor = 0;
-
-  anchors.forEach((thread) => {
-    if (thread.startOffset > cursor) {
-      appendFormattedRange(fragment, parts, cursor, thread.startOffset);
-    }
-
-    fragment.appendChild(renderInlineThreadAnchor(thread, parts));
-    if (!thread.collapsed) {
-      fragment.appendChild(renderThread(thread, [...threadPath, thread.id]));
-    }
-    cursor = thread.endOffset;
-  });
-
-  const displayLength = getDisplayTextLength(parts);
-  if (cursor < displayLength) {
-    appendFormattedRange(fragment, parts, cursor, displayLength);
+  while (container.firstChild) {
+    fragment.appendChild(container.firstChild);
   }
 
   return fragment;
-}
-
-function renderInlineThreadAnchor(thread, parts) {
-  const wrapper = document.createElement("span");
-  wrapper.className = "anchor-inline";
-
-  const mark = document.createElement("mark");
-  mark.className = `anchor-highlight ${thread.collapsed ? "is-collapsed" : "is-open"}`;
-  mark.dataset.threadId = thread.id;
-  mark.title = thread.collapsed ? "Open focused thread" : "Close focused thread";
-  appendFormattedRange(mark, parts, thread.startOffset, thread.endOffset);
-
-  const toggle = document.createElement("button");
-  toggle.type = "button";
-  toggle.className = "thread-toggle thread-inline-toggle";
-  toggle.dataset.threadToggle = thread.id;
-  toggle.setAttribute("aria-expanded", String(!thread.collapsed));
-  toggle.setAttribute("aria-label", thread.collapsed ? "Open focused thread" : "Close focused thread");
-  toggle.textContent = thread.collapsed ? "+" : "-";
-
-  wrapper.append(mark, toggle);
-  return wrapper;
 }
 
 function buildRenderableAnchors(threads) {
@@ -1120,54 +1237,362 @@ function buildRenderableAnchors(threads) {
   return renderable;
 }
 
-function parseSimpleMarkdown(text) {
-  const parts = [];
-  const pattern = /(\*\*|__)(.+?)\1/gs;
+function buildMarkdownFragment(text) {
+  const fragment = document.createDocumentFragment();
+  const blocks = parseMarkdownBlocks(text);
+
+  blocks.forEach((block, index) => {
+    if (index > 0) {
+      fragment.appendChild(document.createTextNode("\n\n"));
+    }
+
+    fragment.appendChild(renderMarkdownBlock(block));
+  });
+
+  return fragment;
+}
+
+function parseMarkdownBlocks(text) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const blocks = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const fenceMatch = line.match(/^```([\w-]+)?\s*$/);
+    if (fenceMatch) {
+      const language = fenceMatch[1] || "";
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !/^```/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      blocks.push({ type: "code", language, text: codeLines.join("\n") });
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      blocks.push({
+        type: "heading",
+        level: headingMatch[1].length,
+        text: headingMatch[2].trim(),
+      });
+      index += 1;
+      continue;
+    }
+
+    if (/^(\s*)([-*+])\s+/.test(line)) {
+      const items = [];
+      while (index < lines.length && /^(\s*)([-*+])\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^(\s*)([-*+])\s+/, "").trim());
+        index += 1;
+      }
+      blocks.push({ type: "list", ordered: false, items });
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(line)) {
+      const items = [];
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^\d+\.\s+/, "").trim());
+        index += 1;
+      }
+      blocks.push({ type: "list", ordered: true, items });
+      continue;
+    }
+
+    if (/^>\s?/.test(line)) {
+      const quoteLines = [];
+      while (index < lines.length && /^>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^>\s?/, ""));
+        index += 1;
+      }
+      blocks.push({ type: "blockquote", text: quoteLines.join("\n") });
+      continue;
+    }
+
+    if (/^([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+      blocks.push({ type: "divider" });
+      index += 1;
+      continue;
+    }
+
+    const paragraphLines = [];
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !/^```/.test(lines[index]) &&
+      !/^(#{1,6})\s+/.test(lines[index]) &&
+      !/^(\s*)([-*+])\s+/.test(lines[index]) &&
+      !/^\d+\.\s+/.test(lines[index]) &&
+      !/^>\s?/.test(lines[index]) &&
+      !/^([-*_])(?:\s*\1){2,}\s*$/.test(lines[index])
+    ) {
+      paragraphLines.push(lines[index].trim());
+      index += 1;
+    }
+    blocks.push({ type: "paragraph", text: paragraphLines.join(" ") });
+  }
+
+  return blocks;
+}
+
+function renderMarkdownBlock(block) {
+  switch (block.type) {
+    case "heading":
+      return createMarkdownInlineBlock(`md-block md-heading md-heading-${block.level}`, block.text);
+    case "paragraph":
+      return createMarkdownInlineBlock("md-block md-paragraph", block.text);
+    case "blockquote":
+      return createMarkdownInlineBlock("md-block md-blockquote", block.text);
+    case "list":
+      return createMarkdownListBlock(block);
+    case "code":
+      return createMarkdownCodeBlock(block);
+    case "divider": {
+      const divider = document.createElement("span");
+      divider.className = "md-block md-divider";
+      divider.setAttribute("aria-hidden", "true");
+      return divider;
+    }
+    default:
+      return createMarkdownInlineBlock("md-block md-paragraph", block.text || "");
+  }
+}
+
+function createMarkdownInlineBlock(className, text) {
+  const block = document.createElement("span");
+  block.className = className;
+  appendInlineMarkdown(block, text);
+  return block;
+}
+
+function createMarkdownListBlock(block) {
+  const wrapper = document.createElement("span");
+  wrapper.className = "md-block md-list";
+
+  block.items.forEach((itemText, index) => {
+    if (index > 0) {
+      wrapper.appendChild(document.createTextNode("\n"));
+    }
+
+    const item = document.createElement("span");
+    item.className = "md-list-item";
+    item.dataset.marker = block.ordered ? `${index + 1}.` : "\u2022";
+    appendInlineMarkdown(item, itemText);
+    wrapper.appendChild(item);
+  });
+
+  return wrapper;
+}
+
+function createMarkdownCodeBlock(block) {
+  const wrapper = document.createElement("span");
+  wrapper.className = "md-block md-code-block";
+  if (block.language) {
+    wrapper.dataset.language = block.language;
+  }
+
+  const code = document.createElement("code");
+  code.textContent = block.text;
+  wrapper.appendChild(code);
+  return wrapper;
+}
+
+function appendInlineMarkdown(parent, text) {
+  const pattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|`([^`]+)`|(\*\*|__)(.+?)\4|(\*|_)(.+?)\6/gs;
   let cursor = 0;
   let match;
 
   while ((match = pattern.exec(text)) !== null) {
     if (match.index > cursor) {
-      parts.push({ strong: false, text: text.slice(cursor, match.index) });
+      parent.appendChild(document.createTextNode(text.slice(cursor, match.index)));
     }
 
-    parts.push({ strong: true, text: match[2] });
+    if (match[1] && match[2]) {
+      const link = document.createElement("a");
+      link.href = match[2];
+      link.target = "_blank";
+      link.rel = "noreferrer noopener";
+      appendInlineMarkdown(link, match[1]);
+      parent.appendChild(link);
+    } else if (match[3]) {
+      const code = document.createElement("code");
+      code.className = "md-inline-code";
+      code.textContent = match[3];
+      parent.appendChild(code);
+    } else if (match[5]) {
+      const strong = document.createElement("strong");
+      appendInlineMarkdown(strong, match[5]);
+      parent.appendChild(strong);
+    } else if (match[7]) {
+      const emphasis = document.createElement("em");
+      appendInlineMarkdown(emphasis, match[7]);
+      parent.appendChild(emphasis);
+    }
+
     cursor = match.index + match[0].length;
   }
 
   if (cursor < text.length) {
-    parts.push({ strong: false, text: text.slice(cursor) });
+    parent.appendChild(document.createTextNode(text.slice(cursor)));
   }
-
-  return parts.length ? parts : [{ strong: false, text }];
 }
 
-function appendFormattedRange(parent, parts, start, end) {
-  if (end <= start) {
-    return;
-  }
+function applyThreadAnchors(container, threads, threadPath) {
+  const anchors = buildRenderableAnchors(threads)
+    .slice()
+    .sort((a, b) => b.startOffset - a.startOffset);
 
-  let cursor = 0;
-  parts.forEach((part) => {
-    const nextCursor = cursor + part.text.length;
-    const sliceStart = Math.max(start, cursor);
-    const sliceEnd = Math.min(end, nextCursor);
-
-    if (sliceEnd > sliceStart) {
-      const text = part.text.slice(sliceStart - cursor, sliceEnd - cursor);
-      const node = part.strong ? document.createElement("strong") : document.createTextNode(text);
-      if (part.strong) {
-        node.textContent = text;
-      }
-      parent.appendChild(node);
-    }
-
-    cursor = nextCursor;
+  anchors.forEach((thread) => {
+    renderThreadAnchorIntoMarkdown(container, thread, threadPath);
   });
 }
 
-function getDisplayTextLength(parts) {
-  return parts.reduce((total, part) => total + part.text.length, 0);
+function renderThreadAnchorIntoMarkdown(container, thread, threadPath) {
+  const start = locateRenderableTextPosition(container, thread.startOffset, "start");
+  const end = locateRenderableTextPosition(container, thread.endOffset, "end");
+  if (!start || !end) {
+    return;
+  }
+
+  const isolated = isolateRenderableTextRange(start, end);
+  if (!isolated) {
+    return;
+  }
+
+  const textNodes = collectRenderableTextNodes(container, isolated.startNode, isolated.endNode);
+  if (!textNodes.length) {
+    return;
+  }
+
+  let lastMark = null;
+  textNodes.forEach((node) => {
+    const mark = document.createElement("mark");
+    mark.className = `anchor-highlight ${thread.collapsed ? "is-collapsed" : "is-open"}`;
+    mark.dataset.threadId = thread.id;
+    mark.dataset.threadGenerated = "true";
+    mark.title = thread.collapsed ? "Open focused thread" : "Close focused thread";
+    mark.textContent = node.data;
+    node.replaceWith(mark);
+    lastMark = mark;
+  });
+
+  if (!lastMark) {
+    return;
+  }
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "thread-toggle thread-inline-toggle";
+  toggle.dataset.threadToggle = thread.id;
+  toggle.dataset.threadGenerated = "true";
+  toggle.setAttribute("aria-expanded", String(!thread.collapsed));
+  toggle.setAttribute("aria-label", thread.collapsed ? "Open focused thread" : "Close focused thread");
+  toggle.textContent = thread.collapsed ? "+" : "-";
+  lastMark.after(toggle);
+
+  if (!thread.collapsed) {
+    toggle.after(renderThread(thread, [...threadPath, thread.id]));
+  }
+}
+
+function createRenderableTextWalker(root) {
+  return document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!node.data.length) {
+        return NodeFilter.FILTER_REJECT;
+      }
+
+      if (node.parentElement?.closest("[data-thread-generated='true'], .thread-card")) {
+        return NodeFilter.FILTER_REJECT;
+      }
+
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+}
+
+function locateRenderableTextPosition(container, targetOffset, bias = "start") {
+  const walker = createRenderableTextWalker(container);
+  let traversed = 0;
+  let lastNode = null;
+
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const nextTraversed = traversed + node.data.length;
+
+    const isBoundary = targetOffset === nextTraversed;
+    if (targetOffset < nextTraversed || (bias === "end" && isBoundary)) {
+      return { node, offset: targetOffset - traversed };
+    }
+
+    traversed = nextTraversed;
+    lastNode = node;
+  }
+
+  if (lastNode) {
+    return { node: lastNode, offset: lastNode.data.length };
+  }
+
+  return null;
+}
+
+function isolateRenderableTextRange(start, end) {
+  if (!start.node || !end.node || (start.node === end.node && start.offset === end.offset)) {
+    return null;
+  }
+
+  if (start.node === end.node) {
+    const node = start.node;
+    if (end.offset < node.data.length) {
+      node.splitText(end.offset);
+    }
+
+    const selectedNode = start.offset > 0 ? node.splitText(start.offset) : node;
+    return { startNode: selectedNode, endNode: selectedNode };
+  }
+
+  if (end.offset < end.node.data.length) {
+    end.node.splitText(end.offset);
+  }
+
+  const startNode = start.offset > 0 ? start.node.splitText(start.offset) : start.node;
+  return { startNode, endNode: end.node };
+}
+
+function collectRenderableTextNodes(container, startNode, endNode) {
+  const nodes = [];
+  const walker = createRenderableTextWalker(container);
+  let isCollecting = false;
+
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (node === startNode) {
+      isCollecting = true;
+    }
+
+    if (isCollecting) {
+      nodes.push(node);
+    }
+
+    if (node === endNode) {
+      break;
+    }
+  }
+
+  return nodes;
 }
 
 function buildConversationPreview(conversation) {
@@ -1288,9 +1713,9 @@ function normalizeWhitespace(value) {
 }
 
 function getPlainText(value) {
-  return parseSimpleMarkdown(value)
-    .map((part) => part.text)
-    .join("");
+  const container = document.createElement("div");
+  container.appendChild(buildMarkdownFragment(value));
+  return container.textContent || "";
 }
 
 function parseThreadPath(path) {
