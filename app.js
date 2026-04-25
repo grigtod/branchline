@@ -35,6 +35,7 @@ const dom = {
   collapseSidebarButton: document.getElementById("collapse-sidebar-button"),
   expandSidebarButton: document.getElementById("expand-sidebar-button"),
   toggleFullscreenButton: document.getElementById("toggle-fullscreen-button"),
+  openFavoritesButton: document.getElementById("open-favorites-button"),
   openSettingsButton: document.getElementById("open-settings-button"),
   closeSettingsButton: document.getElementById("close-settings-button"),
   conversationList: document.getElementById("conversation-list"),
@@ -52,6 +53,10 @@ const dom = {
   rootSendButton: document.getElementById("send-root-button"),
   settingsPage: document.getElementById("settings-page"),
   settingsBackdrop: document.getElementById("settings-backdrop"),
+  favoritesPage: document.getElementById("favorites-page"),
+  favoritesBackdrop: document.getElementById("favorites-backdrop"),
+  closeFavoritesButton: document.getElementById("close-favorites-button"),
+  favoritesList: document.getElementById("favorites-list"),
   selectionMenu: document.getElementById("selection-menu"),
   buttonTooltip: document.getElementById("button-tooltip"),
   toastRegion: document.getElementById("toast-region"),
@@ -62,6 +67,7 @@ const ui = {
   pendingScopes: new Set(),
   selection: null,
   settingsOpen: false,
+  favoritesOpen: false,
   sidebarCollapsed: false,
   pendingScrollThreadId: null,
   hoveredTooltipButton: null,
@@ -84,6 +90,7 @@ function bindEvents() {
   dom.collapseSidebarButton.addEventListener("click", handleCollapseSidebar);
   dom.expandSidebarButton.addEventListener("click", handleExpandSidebar);
   dom.toggleFullscreenButton.addEventListener("click", handleToggleFullscreen);
+  dom.openFavoritesButton.addEventListener("click", openFavoritesPage);
   dom.openSettingsButton.addEventListener("click", openSettingsPage);
   dom.closeSettingsButton.addEventListener("click", closeSettingsPage);
   dom.conversationList.addEventListener("click", handleConversationListClick);
@@ -99,6 +106,9 @@ function bindEvents() {
   dom.chatView.addEventListener("keydown", handleComposerKeydown);
   dom.chatView.addEventListener("submit", handleThreadSubmit);
   dom.settingsBackdrop.addEventListener("click", closeSettingsPage);
+  dom.favoritesBackdrop.addEventListener("click", closeFavoritesPage);
+  dom.closeFavoritesButton.addEventListener("click", closeFavoritesPage);
+  dom.favoritesList.addEventListener("click", handleFavoritesListClick);
   dom.selectionMenu.addEventListener("click", handleSelectionMenuClick);
   document.addEventListener("mouseup", handleSelectionCandidate);
   document.addEventListener("keyup", handleSelectionCandidate);
@@ -125,6 +135,7 @@ function handleNewChat() {
 function handleEnterApp() {
   ui.appEntered = true;
   ui.settingsOpen = false;
+  ui.favoritesOpen = false;
   render();
   window.requestAnimationFrame(() => {
     dom.rootInput.focus();
@@ -166,6 +177,7 @@ function handleConversationListClick(event) {
     const conversationId = deleteButton.dataset.deleteConversationId;
     const remaining = state.conversations.filter((conversation) => conversation.id !== conversationId);
     state.conversations = remaining.length ? remaining : [createConversation()];
+    state.favorites = (state.favorites || []).filter((favorite) => favorite.conversationId !== conversationId);
 
     if (state.activeConversationId === conversationId || !state.conversations.some((conversation) => conversation.id === state.activeConversationId)) {
       state.activeConversationId = state.conversations[0].id;
@@ -219,9 +231,19 @@ function handleToggleKeyVisibility() {
 }
 
 function handleDocumentKeydown(event) {
-  if (event.key === "Escape" && ui.settingsOpen) {
+  if (event.key !== "Escape") {
+    return;
+  }
+
+  if (ui.settingsOpen) {
     event.preventDefault();
     closeSettingsPage();
+    return;
+  }
+
+  if (ui.favoritesOpen) {
+    event.preventDefault();
+    closeFavoritesPage();
   }
 }
 
@@ -387,6 +409,12 @@ function handleSelectionCandidate() {
     return;
   }
 
+  if (findOverlappingFavorite(getMessageFavorites(conversation.id, messageId), offsets.start, offsets.end)) {
+    clearSelectionMenu();
+    showToast("That passage is already in favorites. Remove it there first if you want to reuse the same span.");
+    return;
+  }
+
   const rect = range.getBoundingClientRect();
   ui.selection = {
     messageId,
@@ -464,6 +492,17 @@ function handleTooltipFocusOut(event) {
 function handleGlobalViewportChange() {
   clearSelectionMenu();
   hideButtonTooltip();
+}
+
+function handleFavoritesListClick(event) {
+  const deleteButton = event.target.closest("[data-delete-favorite-id]");
+  if (!deleteButton) {
+    return;
+  }
+
+  state.favorites = (state.favorites || []).filter((favorite) => favorite.id !== deleteButton.dataset.deleteFavoriteId);
+  saveState();
+  render();
 }
 
 async function handleSelectionThreadAction() {
@@ -565,6 +604,67 @@ async function handleSelectionCompactAction() {
   clearSelectionMenu();
 }
 
+async function handleSelectionBookmarkAction() {
+  if (!ui.selection) {
+    return;
+  }
+
+  const conversation = getActiveConversation();
+  if (!conversation) {
+    clearSelectionMenu();
+    return;
+  }
+
+  const message = findMessageById(conversation.messages, ui.selection.messageId);
+  if (!message) {
+    clearSelectionMenu();
+    return;
+  }
+
+  if (findOverlappingThread(message.threads || [], ui.selection.startOffset, ui.selection.endOffset)) {
+    showToast("You can’t favorite text that already belongs to a branch.");
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  if (findOverlappingCompaction(message.compactions || [], ui.selection.startOffset, ui.selection.endOffset)) {
+    showToast("Expand that compacted text before adding it to favorites.");
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  const overlappingFavorite = findOverlappingFavorite(
+    getMessageFavorites(conversation.id, message.id),
+    ui.selection.startOffset,
+    ui.selection.endOffset,
+  );
+
+  if (overlappingFavorite) {
+    showToast("That passage is already in favorites.");
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  state.favorites = state.favorites || [];
+  state.favorites.push(
+    createFavorite({
+      conversationId: conversation.id,
+      messageId: message.id,
+      selectedText: ui.selection.selectedText,
+      startOffset: ui.selection.startOffset,
+      endOffset: ui.selection.endOffset,
+    }),
+  );
+  saveState();
+  render();
+  showToast("Added to favorites.");
+  clearNativeSelection();
+  clearSelectionMenu();
+}
+
 async function handleSelectionMenuClick(event) {
   const button = event.target.closest("[data-selection-action]");
   if (!button) {
@@ -585,6 +685,11 @@ async function handleSelectionMenuClick(event) {
 
   if (selectionAction === "branch") {
     await handleSelectionThreadAction();
+    return;
+  }
+
+  if (selectionAction === "bookmark") {
+    await handleSelectionBookmarkAction();
     return;
   }
 
@@ -739,6 +844,7 @@ function render() {
   renderAppFrame();
   renderLandingPage();
   renderSettings();
+  renderFavorites();
   renderPricing();
   renderSidebar();
   renderHeader();
@@ -772,7 +878,68 @@ function renderSettings() {
   dom.settingsPage.classList.toggle("hidden", !showSettings);
   dom.settingsPage.setAttribute("aria-hidden", String(!showSettings));
   dom.openSettingsButton.setAttribute("aria-expanded", String(ui.settingsOpen));
-  document.body.classList.toggle("settings-open", showSettings);
+  document.body.classList.toggle("settings-open", showSettings || ui.favoritesOpen);
+}
+
+function renderFavorites() {
+  const showFavorites = ui.appEntered && ui.favoritesOpen;
+  dom.favoritesPage.classList.toggle("hidden", !showFavorites);
+  dom.favoritesPage.setAttribute("aria-hidden", String(!showFavorites));
+  dom.openFavoritesButton.setAttribute("aria-expanded", String(ui.favoritesOpen));
+  document.body.classList.toggle("settings-open", showFavorites || ui.settingsOpen);
+
+  dom.favoritesList.innerHTML = "";
+  const favorites = [...(state.favorites || [])].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  if (!favorites.length) {
+    const empty = document.createElement("div");
+    empty.className = "favorites-empty";
+    empty.textContent = "No favorites yet. Highlight an assistant passage and choose Bookmark to save it here.";
+    dom.favoritesList.appendChild(empty);
+    return;
+  }
+
+  favorites.forEach((favorite) => {
+    const card = document.createElement("article");
+    card.className = "favorite-card";
+
+    const top = document.createElement("div");
+    top.className = "favorite-card-top";
+
+    const textWrap = document.createElement("div");
+
+    const title = document.createElement("h3");
+    title.className = "favorite-card-title";
+    title.textContent = getFavoriteConversationTitle(favorite);
+
+    const meta = document.createElement("p");
+    meta.className = "favorite-card-meta";
+    meta.textContent = formatFavoriteMeta(favorite);
+
+    textWrap.append(title, meta);
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "favorite-delete";
+    deleteButton.dataset.deleteFavoriteId = favorite.id;
+    deleteButton.setAttribute("aria-label", "Delete favorite");
+
+    const deleteIcon = document.createElement("img");
+    deleteIcon.className = "favorite-delete-icon";
+    deleteIcon.src = "assets/delete-bucket.svg";
+    deleteIcon.alt = "";
+    deleteIcon.setAttribute("aria-hidden", "true");
+    deleteButton.appendChild(deleteIcon);
+
+    top.append(textWrap, deleteButton);
+
+    const quote = document.createElement("p");
+    quote.className = "favorite-quote";
+    quote.textContent = favorite.selectedText;
+
+    card.append(top, quote);
+    dom.favoritesList.appendChild(card);
+  });
 }
 
 function renderLandingPage() {
@@ -782,6 +949,8 @@ function renderLandingPage() {
 
 function openSettingsPage() {
   ui.settingsOpen = true;
+  ui.favoritesOpen = false;
+  renderFavorites();
   renderSettings();
   window.requestAnimationFrame(() => {
     dom.apiKeyInput.focus();
@@ -791,6 +960,21 @@ function openSettingsPage() {
 function closeSettingsPage() {
   ui.settingsOpen = false;
   renderSettings();
+}
+
+function openFavoritesPage() {
+  ui.favoritesOpen = true;
+  ui.settingsOpen = false;
+  renderSettings();
+  renderFavorites();
+  window.requestAnimationFrame(() => {
+    dom.closeFavoritesButton.focus();
+  });
+}
+
+function closeFavoritesPage() {
+  ui.favoritesOpen = false;
+  renderFavorites();
 }
 
 function renderPricing() {
@@ -892,7 +1076,7 @@ function renderHeader() {
 
   chips.append(modelChip, thinkingChip);
 
-  controls.append(dom.toggleFullscreenButton, dom.openSettingsButton);
+  controls.append(dom.toggleFullscreenButton, dom.openFavoritesButton, dom.openSettingsButton);
   statusTop.append(chips, controls);
   status.append(statusTop);
   titleWrap.append(meta);
@@ -1056,9 +1240,17 @@ function renderMessage(message, threadPath) {
   body.dataset.threadPath = threadPath.join("|");
 
   if (message.role === "assistant") {
-    body.appendChild(buildFormattedTextFragment(message.content, message.threads || [], threadPath, message.compactions || []));
+    body.appendChild(
+      buildFormattedTextFragment(
+        message.content,
+        message.threads || [],
+        threadPath,
+        message.compactions || [],
+        getMessageFavorites(getActiveConversation()?.id, message.id),
+      ),
+    );
   } else {
-    body.appendChild(buildFormattedTextFragment(message.content, [], threadPath, message.compactions || []));
+    body.appendChild(buildFormattedTextFragment(message.content, [], threadPath, message.compactions || [], []));
   }
 
   shell.append(meta, body);
@@ -1300,12 +1492,12 @@ function autosizeTextarea(textarea) {
   textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
 }
 
-function buildFormattedTextFragment(text, threads, threadPath = [], compactions = []) {
+function buildFormattedTextFragment(text, threads, threadPath = [], compactions = [], favorites = []) {
   const container = document.createElement("div");
   container.className = "markdown-content";
   container.appendChild(buildMarkdownFragment(text));
 
-  applyInlineDecorations(container, threads, threadPath, compactions);
+  applyInlineDecorations(container, threads, threadPath, compactions, favorites);
   refreshCompactOnlyMarkdownBlocks(container);
 
   const fragment = document.createDocumentFragment();
@@ -1316,10 +1508,11 @@ function buildFormattedTextFragment(text, threads, threadPath = [], compactions 
   return fragment;
 }
 
-function buildRenderableDecorations(threads, compactions) {
+function buildRenderableDecorations(threads, compactions, favorites) {
   const decorations = [
     ...(threads || []).map((thread) => ({ ...thread, kind: "thread" })),
     ...(compactions || []).map((compaction) => ({ ...compaction, kind: "compact" })),
+    ...(favorites || []).map((favorite) => ({ ...favorite, kind: "favorite" })),
   ]
     .filter((item) => Number.isInteger(item.startOffset) && Number.isInteger(item.endOffset))
     .slice()
@@ -1553,8 +1746,8 @@ function appendInlineMarkdown(parent, text) {
   }
 }
 
-function applyInlineDecorations(container, threads, threadPath, compactions = []) {
-  const decorations = buildRenderableDecorations(threads, compactions)
+function applyInlineDecorations(container, threads, threadPath, compactions = [], favorites = []) {
+  const decorations = buildRenderableDecorations(threads, compactions, favorites)
     .slice()
     .sort((a, b) => b.startOffset - a.startOffset);
 
@@ -1564,8 +1757,51 @@ function applyInlineDecorations(container, threads, threadPath, compactions = []
       return;
     }
 
+    if (item.kind === "favorite") {
+      renderFavoriteIntoMarkdown(container, item);
+      return;
+    }
+
     renderThreadAnchorIntoMarkdown(container, item, threadPath);
   });
+}
+
+function renderFavoriteIntoMarkdown(container, favorite) {
+  const start = locateRenderableTextPosition(container, favorite.startOffset, "start");
+  const end = locateRenderableTextPosition(container, favorite.endOffset, "end");
+  if (!start || !end) {
+    return;
+  }
+
+  const isolated = isolateRenderableTextRange(start, end);
+  if (!isolated) {
+    return;
+  }
+
+  const textNodes = collectRenderableTextNodes(container, isolated.startNode, isolated.endNode);
+  if (!textNodes.length) {
+    return;
+  }
+
+  let lastMarker = null;
+  textNodes.forEach((node) => {
+    const marker = document.createElement("span");
+    marker.className = "favorite-inline-anchor";
+    marker.dataset.favoriteId = favorite.id;
+    marker.textContent = node.data;
+    node.replaceWith(marker);
+    lastMarker = marker;
+  });
+
+  if (!lastMarker) {
+    return;
+  }
+
+  const indicator = document.createElement("span");
+  indicator.className = "favorite-inline-indicator";
+  indicator.dataset.favoriteIndicator = favorite.id;
+  indicator.setAttribute("aria-hidden", "true");
+  lastMarker.after(indicator);
 }
 
 function renderCompactionIntoMarkdown(container, compaction) {
@@ -1963,6 +2199,12 @@ function findOverlappingCompaction(compactions, startOffset, endOffset) {
   );
 }
 
+function findOverlappingFavorite(favorites, startOffset, endOffset) {
+  return (favorites || []).find(
+    (favorite) => favorite.startOffset < endOffset && favorite.endOffset > startOffset,
+  );
+}
+
 function isSameAnchor(thread, startOffset, endOffset, selectedText) {
   return (
     thread.startOffset === startOffset &&
@@ -2011,6 +2253,12 @@ function createMessage(role, content) {
   };
 }
 
+function getMessageFavorites(conversationId, messageId) {
+  return (state.favorites || []).filter(
+    (favorite) => favorite.conversationId === conversationId && favorite.messageId === messageId,
+  );
+}
+
 function createThread({ anchorText, anchorMessageId, startOffset, endOffset }) {
   return {
     id: crypto.randomUUID(),
@@ -2030,6 +2278,18 @@ function createCompaction({ compactedText, startOffset, endOffset }) {
   return {
     id: crypto.randomUUID(),
     compactedText,
+    startOffset,
+    endOffset,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function createFavorite({ conversationId, messageId, selectedText, startOffset, endOffset }) {
+  return {
+    id: crypto.randomUUID(),
+    conversationId,
+    messageId,
+    selectedText,
     startOffset,
     endOffset,
     createdAt: new Date().toISOString(),
@@ -2092,6 +2352,24 @@ function formatTime(value) {
   });
 }
 
+function formatDateTime(value) {
+  return new Date(value).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function getFavoriteConversationTitle(favorite) {
+  const conversation = state.conversations.find((item) => item.id === favorite.conversationId);
+  return conversation?.title || "Saved snippet";
+}
+
+function formatFavoriteMeta(favorite) {
+  return `${truncate(normalizeWhitespace(favorite.selectedText), 72)} · ${formatDateTime(favorite.createdAt)}`;
+}
+
 function countMessages(messages) {
   return flattenMessages(messages).length;
 }
@@ -2149,6 +2427,7 @@ function createFreshState() {
       model: DEFAULT_MODELS[0],
       thinking: "medium",
     },
+    favorites: [],
     conversations: [conversation],
     activeConversationId: conversation.id,
   };
@@ -2174,6 +2453,7 @@ function normalizeState(candidate) {
       model: DEFAULT_MODELS.includes(settings.model) ? settings.model : DEFAULT_MODELS[0],
       thinking: DEFAULT_THINKING.includes(settings.thinking) ? settings.thinking : "medium",
     },
+    favorites: Array.isArray(candidate?.favorites) ? candidate.favorites.map(normalizeFavorite) : [],
     conversations,
     activeConversationId,
   };
@@ -2223,6 +2503,18 @@ function normalizeCompaction(compaction) {
     startOffset: Number.isInteger(compaction.startOffset) ? compaction.startOffset : 0,
     endOffset: Number.isInteger(compaction.endOffset) ? compaction.endOffset : 0,
     createdAt: compaction.createdAt || new Date().toISOString(),
+  };
+}
+
+function normalizeFavorite(favorite) {
+  return {
+    id: typeof favorite.id === "string" ? favorite.id : crypto.randomUUID(),
+    conversationId: typeof favorite.conversationId === "string" ? favorite.conversationId : "",
+    messageId: typeof favorite.messageId === "string" ? favorite.messageId : "",
+    selectedText: typeof favorite.selectedText === "string" ? favorite.selectedText : "",
+    startOffset: Number.isInteger(favorite.startOffset) ? favorite.startOffset : 0,
+    endOffset: Number.isInteger(favorite.endOffset) ? favorite.endOffset : 0,
+    createdAt: favorite.createdAt || new Date().toISOString(),
   };
 }
 
