@@ -729,6 +729,7 @@ button {
 }
 
 .message {
+  --message-bubble-width: 860px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -743,19 +744,24 @@ button {
 }
 
 .message-shell {
-  width: min(860px, 100%);
+  width: min(var(--message-bubble-width), 100%);
   padding: 16px 18px;
   border-radius: 24px;
   box-shadow: var(--shadow-soft);
+  transition: width 220ms ease;
 }
 
-.message.user .message-shell {
+.app-shell.sidebar-collapsed .message.assistant {
+  --message-bubble-width: 1120px;
+}
+
+.message.user > .message-shell {
   background: var(--user-bubble);
   color: #f3fbff;
   border-top-right-radius: 8px;
 }
 
-.message.assistant .message-shell {
+.message.assistant > .message-shell {
   background: var(--assistant-bubble);
   border: 1px solid rgba(22, 59, 82, 0.08);
   border-top-left-radius: 8px;
@@ -843,10 +849,24 @@ button {
   font-weight: 700;
 }
 
+.md-list-item.is-compact-only {
+  padding-left: 0;
+}
+
+.md-list-item.is-compact-only::before {
+  content: none;
+}
+
 .md-blockquote {
   padding: 0.15rem 0 0.15rem 1rem;
   border-left: 3px solid rgba(12, 122, 105, 0.24);
   color: var(--muted);
+}
+
+.md-blockquote.is-compact-only {
+  padding-left: 0;
+  border-left: 0;
+  color: inherit;
 }
 
 .md-divider {
@@ -895,6 +915,39 @@ button {
 
 .anchor-inline {
   display: inline;
+}
+
+.compact-inline-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.3rem;
+  height: 1.45rem;
+  margin: 0 0.2rem;
+  padding: 0 0.55rem 0.08rem;
+  border: 1px solid rgba(22, 59, 82, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow:
+    0 10px 22px rgba(20, 30, 36, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82);
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.18em;
+  vertical-align: text-top;
+}
+
+.compact-inline-button:hover,
+.compact-inline-button:focus-visible {
+  border-color: rgba(12, 122, 105, 0.2);
+  background: rgba(239, 247, 244, 0.96);
+  color: var(--accent);
+  box-shadow:
+    0 12px 24px rgba(12, 122, 105, 0.12),
+    inset 0 0 0 1px rgba(12, 122, 105, 0.08);
+  outline: none;
 }
 
 .anchor-highlight {
@@ -975,6 +1028,37 @@ button {
   align-items: center;
   gap: 10px;
   justify-content: flex-end;
+}
+
+.thread-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(202, 56, 56, 0.1);
+  color: #b63f3f;
+  box-shadow: none;
+}
+
+.thread-delete:hover,
+.thread-delete:focus-visible {
+  background: rgba(202, 56, 56, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(182, 63, 63, 0.08);
+  outline: none;
+}
+
+.thread-delete-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  object-fit: contain;
+  object-position: center;
+  filter: invert(22%) sepia(50%) saturate(2267%) hue-rotate(336deg) brightness(91%) contrast(92%);
 }
 
 .thread-body {

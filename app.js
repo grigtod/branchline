@@ -20,7 +20,6 @@ const MODEL_PRICING = {
   "gpt-4.1-nano": { input: 0.1, output: 0.4 },
 };
 const SELECTION_ACTION_TOASTS = {
-  compact: "Compact is coming soon.",
   debate: "Debate is coming soon.",
   analyse: "Analyse is coming soon.",
   bookmark: "Bookmark is coming soon.",
@@ -229,6 +228,36 @@ function handleDocumentKeydown(event) {
 function handleChatViewClick(event) {
   const conversation = getActiveConversation();
   if (!conversation) {
+    return;
+  }
+
+  const deleteThreadButton = event.target.closest("[data-delete-thread-id]");
+  if (deleteThreadButton) {
+    const didDelete = removeThreadById(conversation.messages, deleteThreadButton.dataset.deleteThreadId);
+    if (didDelete) {
+      touchConversation(conversation);
+      clearNativeSelection();
+      clearSelectionMenu();
+      saveState();
+      render();
+    }
+    return;
+  }
+
+  const compactToggle = event.target.closest("[data-compaction-toggle]");
+  if (compactToggle) {
+    const messageElement = compactToggle.closest(".message");
+    const message = messageElement ? findMessageById(conversation.messages, messageElement.dataset.messageId) : null;
+    if (message) {
+      message.compactions = (message.compactions || []).filter(
+        (compaction) => compaction.id !== compactToggle.dataset.compactionToggle,
+      );
+      touchConversation(conversation);
+      saveState();
+      render();
+    }
+    clearNativeSelection();
+    clearSelectionMenu();
     return;
   }
 
@@ -484,6 +513,58 @@ async function handleSelectionThreadAction() {
   clearSelectionMenu();
 }
 
+async function handleSelectionCompactAction() {
+  if (!ui.selection) {
+    return;
+  }
+
+  const conversation = getActiveConversation();
+  if (!conversation) {
+    clearSelectionMenu();
+    return;
+  }
+
+  const message = findMessageById(conversation.messages, ui.selection.messageId);
+  if (!message) {
+    clearSelectionMenu();
+    return;
+  }
+
+  const overlappingThread = findOverlappingThread(message.threads || [], ui.selection.startOffset, ui.selection.endOffset);
+  if (overlappingThread) {
+    showToast("You can’t compact text that already belongs to a branch.");
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  const overlappingCompaction = findOverlappingCompaction(
+    message.compactions || [],
+    ui.selection.startOffset,
+    ui.selection.endOffset,
+  );
+  if (overlappingCompaction) {
+    showToast("That span is already compacted.");
+    clearNativeSelection();
+    clearSelectionMenu();
+    return;
+  }
+
+  message.compactions = message.compactions || [];
+  message.compactions.push(
+    createCompaction({
+      compactedText: ui.selection.selectedText,
+      startOffset: ui.selection.startOffset,
+      endOffset: ui.selection.endOffset,
+    }),
+  );
+  touchConversation(conversation);
+  saveState();
+  render();
+  clearNativeSelection();
+  clearSelectionMenu();
+}
+
 async function handleSelectionMenuClick(event) {
   const button = event.target.closest("[data-selection-action]");
   if (!button) {
@@ -496,6 +577,11 @@ async function handleSelectionMenuClick(event) {
   }
 
   event.preventDefault();
+
+  if (selectionAction === "compact") {
+    await handleSelectionCompactAction();
+    return;
+  }
 
   if (selectionAction === "branch") {
     await handleSelectionThreadAction();
@@ -970,9 +1056,9 @@ function renderMessage(message, threadPath) {
   body.dataset.threadPath = threadPath.join("|");
 
   if (message.role === "assistant") {
-    body.appendChild(buildFormattedTextFragment(message.content, message.threads || [], threadPath));
+    body.appendChild(buildFormattedTextFragment(message.content, message.threads || [], threadPath, message.compactions || []));
   } else {
-    body.appendChild(buildFormattedTextFragment(message.content, [], threadPath));
+    body.appendChild(buildFormattedTextFragment(message.content, [], threadPath, message.compactions || []));
   }
 
   shell.append(meta, body);
@@ -1004,7 +1090,20 @@ function renderThread(thread, threadPath) {
   summary.className = "thread-summary";
   summary.textContent = `${thread.messages.length} message${thread.messages.length === 1 ? "" : "s"}`;
 
-  meta.appendChild(summary);
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "thread-delete";
+  deleteButton.dataset.deleteThreadId = thread.id;
+  deleteButton.setAttribute("aria-label", "Delete thread");
+
+  const deleteIcon = document.createElement("img");
+  deleteIcon.className = "thread-delete-icon";
+  deleteIcon.src = "assets/delete-bucket.svg";
+  deleteIcon.alt = "";
+  deleteIcon.setAttribute("aria-hidden", "true");
+  deleteButton.appendChild(deleteIcon);
+
+  meta.append(summary, deleteButton);
   header.append(context, meta);
   section.appendChild(header);
 
@@ -1201,12 +1300,13 @@ function autosizeTextarea(textarea) {
   textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
 }
 
-function buildFormattedTextFragment(text, threads, threadPath = []) {
+function buildFormattedTextFragment(text, threads, threadPath = [], compactions = []) {
   const container = document.createElement("div");
   container.className = "markdown-content";
   container.appendChild(buildMarkdownFragment(text));
 
-  applyThreadAnchors(container, threads, threadPath);
+  applyInlineDecorations(container, threads, threadPath, compactions);
+  refreshCompactOnlyMarkdownBlocks(container);
 
   const fragment = document.createDocumentFragment();
   while (container.firstChild) {
@@ -1216,22 +1316,25 @@ function buildFormattedTextFragment(text, threads, threadPath = []) {
   return fragment;
 }
 
-function buildRenderableAnchors(threads) {
-  const anchors = (threads || [])
-    .filter((thread) => Number.isInteger(thread.startOffset) && Number.isInteger(thread.endOffset))
+function buildRenderableDecorations(threads, compactions) {
+  const decorations = [
+    ...(threads || []).map((thread) => ({ ...thread, kind: "thread" })),
+    ...(compactions || []).map((compaction) => ({ ...compaction, kind: "compact" })),
+  ]
+    .filter((item) => Number.isInteger(item.startOffset) && Number.isInteger(item.endOffset))
     .slice()
-    .sort((a, b) => a.startOffset - b.startOffset);
+    .sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
 
   const renderable = [];
   let lastEnd = -1;
 
-  anchors.forEach((thread) => {
-    if (thread.startOffset < lastEnd || thread.endOffset <= thread.startOffset) {
+  decorations.forEach((item) => {
+    if (item.startOffset < lastEnd || item.endOffset <= item.startOffset) {
       return;
     }
 
-    renderable.push(thread);
-    lastEnd = thread.endOffset;
+    renderable.push(item);
+    lastEnd = item.endOffset;
   });
 
   return renderable;
@@ -1450,13 +1553,72 @@ function appendInlineMarkdown(parent, text) {
   }
 }
 
-function applyThreadAnchors(container, threads, threadPath) {
-  const anchors = buildRenderableAnchors(threads)
+function applyInlineDecorations(container, threads, threadPath, compactions = []) {
+  const decorations = buildRenderableDecorations(threads, compactions)
     .slice()
     .sort((a, b) => b.startOffset - a.startOffset);
 
-  anchors.forEach((thread) => {
-    renderThreadAnchorIntoMarkdown(container, thread, threadPath);
+  decorations.forEach((item) => {
+    if (item.kind === "compact") {
+      renderCompactionIntoMarkdown(container, item);
+      return;
+    }
+
+    renderThreadAnchorIntoMarkdown(container, item, threadPath);
+  });
+}
+
+function renderCompactionIntoMarkdown(container, compaction) {
+  const start = locateRenderableTextPosition(container, compaction.startOffset, "start");
+  const end = locateRenderableTextPosition(container, compaction.endOffset, "end");
+  if (!start || !end) {
+    return;
+  }
+
+  const isolated = isolateRenderableTextRange(start, end);
+  if (!isolated) {
+    return;
+  }
+
+  const textNodes = collectRenderableTextNodes(container, isolated.startNode, isolated.endNode);
+  if (!textNodes.length) {
+    return;
+  }
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "compact-inline-button";
+  button.dataset.compactionToggle = compaction.id;
+  button.dataset.sourceLength = String(compaction.endOffset - compaction.startOffset);
+  button.setAttribute("aria-label", "Expand compacted text");
+  button.textContent = "...";
+
+  textNodes[0].replaceWith(button);
+  textNodes.slice(1).forEach((node) => node.remove());
+}
+
+function refreshCompactOnlyMarkdownBlocks(container) {
+  container.querySelectorAll(".md-list-item, .md-blockquote").forEach((block) => {
+    const hasCompactButton = Boolean(block.querySelector("button[data-compaction-toggle]"));
+    block.classList.toggle("is-compact-only", hasCompactButton && isCompactOnlyContent(block));
+  });
+}
+
+function isCompactOnlyContent(node) {
+  return Array.from(node.childNodes).every((child) => {
+    if (child.nodeType === Node.TEXT_NODE) {
+      return !child.data.trim();
+    }
+
+    if (child.nodeType !== Node.ELEMENT_NODE) {
+      return true;
+    }
+
+    if (child.matches("button[data-compaction-toggle]")) {
+      return true;
+    }
+
+    return isCompactOnlyContent(child);
   });
 }
 
@@ -1663,6 +1825,25 @@ function findThreadById(messages, threadId) {
   return null;
 }
 
+function removeThreadById(messages, threadId) {
+  for (const message of messages) {
+    const threads = message.threads || [];
+    const matchIndex = threads.findIndex((thread) => thread.id === threadId);
+    if (matchIndex >= 0) {
+      threads.splice(matchIndex, 1);
+      return true;
+    }
+
+    for (const thread of threads) {
+      if (removeThreadById(thread.messages, threadId)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 function findSelectionMessageText(range) {
   const common = range.commonAncestorContainer;
   const element = common.nodeType === Node.ELEMENT_NODE ? common : common.parentElement;
@@ -1680,23 +1861,105 @@ function findSelectionMessageText(range) {
 }
 
 function getRangeOffsets(container, range) {
-  const startRange = range.cloneRange();
-  startRange.selectNodeContents(container);
-  startRange.setEnd(range.startContainer, range.startOffset);
-
-  const endRange = range.cloneRange();
-  endRange.selectNodeContents(container);
-  endRange.setEnd(range.endContainer, range.endOffset);
-
   return {
-    start: startRange.toString().length,
-    end: endRange.toString().length,
+    start: getSourceOffsetForBoundary(container, range.startContainer, range.startOffset),
+    end: getSourceOffsetForBoundary(container, range.endContainer, range.endOffset),
   };
+}
+
+function getSourceOffsetForBoundary(root, targetNode, targetOffset) {
+  const state = {
+    offset: 0,
+    found: false,
+  };
+
+  walkSourceNodes(root, targetNode, targetOffset, state);
+  return state.offset;
+}
+
+function walkSourceNodes(node, targetNode, targetOffset, state) {
+  if (state.found) {
+    return;
+  }
+
+  if (node === targetNode) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      state.offset += targetOffset;
+      state.found = true;
+      return;
+    }
+
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const limit = Math.min(targetOffset, node.childNodes.length);
+      for (let index = 0; index < limit; index += 1) {
+        state.offset += measureSourceLength(node.childNodes[index]);
+      }
+      state.found = true;
+    }
+    return;
+  }
+
+  if (node.nodeType === Node.TEXT_NODE) {
+    state.offset += node.data.length;
+    return;
+  }
+
+  if (node.nodeType !== Node.ELEMENT_NODE) {
+    return;
+  }
+
+  if (isZeroLengthSourceNode(node)) {
+    return;
+  }
+
+  if (isCompactionToggleNode(node)) {
+    state.offset += measureSourceLength(node);
+    return;
+  }
+
+  Array.from(node.childNodes).some((child) => {
+    walkSourceNodes(child, targetNode, targetOffset, state);
+    return state.found;
+  });
+}
+
+function measureSourceLength(node) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return node.data.length;
+  }
+
+  if (node.nodeType !== Node.ELEMENT_NODE) {
+    return 0;
+  }
+
+  if (isCompactionToggleNode(node)) {
+    return Number(node.dataset.sourceLength) || 0;
+  }
+
+  if (isZeroLengthSourceNode(node)) {
+    return 0;
+  }
+
+  return Array.from(node.childNodes).reduce((total, child) => total + measureSourceLength(child), 0);
+}
+
+function isCompactionToggleNode(node) {
+  return node.matches?.("button[data-compaction-toggle]");
+}
+
+function isZeroLengthSourceNode(node) {
+  return node.matches?.(".thread-card, button[data-thread-toggle]");
 }
 
 function findOverlappingThread(threads, startOffset, endOffset) {
   return (threads || []).find(
     (thread) => thread.startOffset < endOffset && thread.endOffset > startOffset,
+  );
+}
+
+function findOverlappingCompaction(compactions, startOffset, endOffset) {
+  return (compactions || []).find(
+    (compaction) => compaction.startOffset < endOffset && compaction.endOffset > startOffset,
   );
 }
 
@@ -1743,6 +2006,7 @@ function createMessage(role, content) {
     role,
     content,
     threads: [],
+    compactions: [],
     createdAt: new Date().toISOString(),
   };
 }
@@ -1759,6 +2023,16 @@ function createThread({ anchorText, anchorMessageId, startOffset, endOffset }) {
     draft: "",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+  };
+}
+
+function createCompaction({ compactedText, startOffset, endOffset }) {
+  return {
+    id: crypto.randomUUID(),
+    compactedText,
+    startOffset,
+    endOffset,
+    createdAt: new Date().toISOString(),
   };
 }
 
@@ -1922,6 +2196,7 @@ function normalizeMessage(message) {
     role: message.role === "assistant" ? "assistant" : "user",
     content: typeof message.content === "string" ? message.content : "",
     threads: Array.isArray(message.threads) ? message.threads.map(normalizeThread) : [],
+    compactions: Array.isArray(message.compactions) ? message.compactions.map(normalizeCompaction) : [],
     createdAt: message.createdAt || new Date().toISOString(),
   };
 }
@@ -1938,6 +2213,16 @@ function normalizeThread(thread) {
     draft: typeof thread.draft === "string" ? thread.draft : "",
     createdAt: thread.createdAt || new Date().toISOString(),
     updatedAt: thread.updatedAt || thread.createdAt || new Date().toISOString(),
+  };
+}
+
+function normalizeCompaction(compaction) {
+  return {
+    id: typeof compaction.id === "string" ? compaction.id : crypto.randomUUID(),
+    compactedText: typeof compaction.compactedText === "string" ? compaction.compactedText : "",
+    startOffset: Number.isInteger(compaction.startOffset) ? compaction.startOffset : 0,
+    endOffset: Number.isInteger(compaction.endOffset) ? compaction.endOffset : 0,
+    createdAt: compaction.createdAt || new Date().toISOString(),
   };
 }
 
