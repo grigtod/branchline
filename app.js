@@ -52,6 +52,14 @@ const dom = {
   favoritesBackdrop: document.getElementById("favorites-backdrop"),
   closeFavoritesButton: document.getElementById("close-favorites-button"),
   favoritesList: document.getElementById("favorites-list"),
+  analysisPage: document.getElementById("analysis-page"),
+  analysisBackdrop: document.getElementById("analysis-backdrop"),
+  closeAnalysisButton: document.getElementById("close-analysis-button"),
+  analysisForm: document.getElementById("analysis-form"),
+  analysisInput: document.getElementById("analysis-input"),
+  analysisSelectionPreview: document.getElementById("analysis-selection-preview"),
+  analysisCancelButton: document.getElementById("analysis-cancel-button"),
+  analysisSubmitButton: document.getElementById("analysis-submit-button"),
   selectionMenu: document.getElementById("selection-menu"),
   buttonTooltip: document.getElementById("button-tooltip"),
   toastRegion: document.getElementById("toast-region"),
@@ -60,10 +68,13 @@ const dom = {
 const ui = {
   appEntered: !ENABLE_LANDING_PAGE,
   pendingScopes: new Set(),
-  pendingAnalyses: new Set(),
+  pendingAnalyses: [],
   selection: null,
   settingsOpen: false,
   favoritesOpen: false,
+  analysisOpen: false,
+  analysisDraft: "",
+  analysisSelection: null,
   sidebarCollapsed: false,
   pendingScrollThreadId: null,
   hoveredTooltipButton: null,
@@ -105,6 +116,11 @@ function bindEvents() {
   dom.favoritesBackdrop.addEventListener("click", closeFavoritesPage);
   dom.closeFavoritesButton.addEventListener("click", closeFavoritesPage);
   dom.favoritesList.addEventListener("click", handleFavoritesListClick);
+  dom.analysisBackdrop.addEventListener("click", handleAnalysisDismissRequest);
+  dom.closeAnalysisButton.addEventListener("click", handleAnalysisDismissRequest);
+  dom.analysisCancelButton.addEventListener("click", handleAnalysisDismissRequest);
+  dom.analysisForm.addEventListener("submit", handleAnalysisSubmit);
+  dom.analysisInput.addEventListener("input", handleAnalysisDraftInput);
   dom.selectionMenu.addEventListener("click", handleSelectionMenuClick);
   document.addEventListener("mouseup", handleSelectionCandidate);
   document.addEventListener("keyup", handleSelectionCandidate);
@@ -132,6 +148,9 @@ function handleEnterApp() {
   ui.appEntered = true;
   ui.settingsOpen = false;
   ui.favoritesOpen = false;
+  ui.analysisOpen = false;
+  ui.analysisDraft = "";
+  ui.analysisSelection = null;
   render();
   window.requestAnimationFrame(() => {
     dom.rootInput.focus();
@@ -228,6 +247,12 @@ function handleToggleKeyVisibility() {
 
 function handleDocumentKeydown(event) {
   if (event.key !== "Escape") {
+    return;
+  }
+
+  if (ui.analysisOpen) {
+    event.preventDefault();
+    handleAnalysisDismissRequest();
     return;
   }
 
@@ -389,8 +414,8 @@ function handleSelectionCandidate() {
     return;
   }
 
-  const selectedText = selection.toString().trim();
-  if (selectedText.length < 2) {
+  const selectedText = selection.toString();
+  if (selectedText.trim().length < 2) {
     clearSelectionMenu();
     return;
   }
@@ -516,6 +541,19 @@ function handleFavoritesListClick(event) {
   state.favorites = (state.favorites || []).filter((favorite) => favorite.id !== deleteButton.dataset.deleteFavoriteId);
   saveState();
   render();
+}
+
+function handleAnalysisDraftInput(event) {
+  ui.analysisDraft = event.target.value;
+  autosizeTextarea(event.target);
+}
+
+function handleAnalysisDismissRequest() {
+  if (isAnalysisPending()) {
+    return;
+  }
+
+  closeAnalysisPage();
 }
 
 async function handleSelectionThreadAction() {
@@ -747,21 +785,6 @@ async function handleSelectionAnalyseAction() {
     return;
   }
 
-  const lensInput = window.prompt("What do you want to analyse in this text?", "");
-  if (lensInput === null) {
-    clearNativeSelection();
-    clearSelectionMenu();
-    return;
-  }
-
-  const analysisPrompt = lensInput.trim();
-  if (!analysisPrompt) {
-    showToast("Add an analysis prompt first.");
-    clearNativeSelection();
-    clearSelectionMenu();
-    return;
-  }
-
   const conversation = getActiveConversation();
   if (!conversation) {
     clearSelectionMenu();
@@ -789,46 +812,16 @@ async function handleSelectionAnalyseAction() {
     return;
   }
 
-  const analysisScopeKey = makeAnalysisScopeKey(conversation.id, message.id);
-  if (ui.pendingAnalyses.has(analysisScopeKey)) {
+  const pendingAnalyses = getPendingAnalysesForMessage(conversation.id, message.id);
+  if (findOverlappingPendingAnalysis(pendingAnalyses, selection.startOffset, selection.endOffset)) {
     clearNativeSelection();
     clearSelectionMenu();
     return;
   }
 
-  ui.pendingAnalyses.add(analysisScopeKey);
   clearNativeSelection();
   clearSelectionMenu();
-  render();
-
-  try {
-    const segments = await requestSelectionAnalysis(selection.selectedText, analysisPrompt, selection.startOffset);
-    if (!segments.length) {
-      showToast(`No strong matches found for "${truncate(normalizeWhitespace(analysisPrompt), 36)}".`);
-      return;
-    }
-
-    message.analyses = message.analyses || [];
-    message.analyses.push(
-      createAnalysis({
-        prompt: analysisPrompt,
-        selectedText: selection.selectedText,
-        startOffset: selection.startOffset,
-        endOffset: selection.endOffset,
-        segments,
-      }),
-    );
-    touchConversation(conversation);
-    saveState();
-    render();
-    showToast(`Applied "${truncate(normalizeWhitespace(analysisPrompt), 28)}" analysis.`);
-  } catch (error) {
-    showToast(error.message || "The analysis request failed.");
-  } finally {
-    ui.pendingAnalyses.delete(analysisScopeKey);
-    saveState();
-    render();
-  }
+  openAnalysisPage(selection);
 }
 
 async function handleSelectionMenuClick(event) {
@@ -1075,9 +1068,10 @@ function buildAnalysisRequestInput(selectedText, analysisPrompt) {
           type: "input_text",
           text:
             "You are a text analysis engine. Return JSON only. " +
-            'Analyze the excerpt using the requested lens and return {"segments":[{"start":number,"end":number,"score":number,"reason":string}]}. ' +
-            "Offsets must be exact character offsets relative to the excerpt, spans must be non-overlapping, highlights must stay tight to the exact words that show the target trait, and score must be between 0 and 1. " +
-            "Return an empty segments array if nothing matches clearly.",
+            'Analyze the excerpt using the requested lens and return {"segments":[{"start":number,"end":number,"score":number,"polarity":"positive"|"negative","reason":string}]}. ' +
+            "Offsets must be exact character offsets relative to the excerpt, spans must be non-overlapping, and together the segments must cover the full excerpt except blank lines or whitespace-only gaps. " +
+            'Every non-empty part of the excerpt must be classified as either "positive" or "negative" relative to the requested lens, and score must be between 0 and 1. ' +
+            "Keep spans tight to the actual wording while still covering all visible text.",
         },
       ],
     },
@@ -1104,6 +1098,94 @@ async function requestSelectionAnalysis(selectedText, analysisPrompt, baseOffset
   return normalizeAnalysisSegments(parsed, selectedText, baseOffset);
 }
 
+async function handleAnalysisSubmit(event) {
+  event.preventDefault();
+
+  const selection = ui.analysisSelection ? { ...ui.analysisSelection } : null;
+  if (!selection) {
+    closeAnalysisPage();
+    return;
+  }
+
+  const analysisPrompt = ui.analysisDraft.trim();
+  if (!analysisPrompt) {
+    showToast("Add an analysis prompt first.");
+    window.requestAnimationFrame(() => {
+      dom.analysisInput.focus();
+    });
+    return;
+  }
+
+  const conversation = getActiveConversation();
+  if (!conversation) {
+    closeAnalysisPage();
+    return;
+  }
+
+  if (!state.settings.apiKey) {
+    showToast("Add your OpenAI API key in Settings first so Branchline can reach the model.");
+    return;
+  }
+
+  const message = findMessageById(conversation.messages, selection.messageId);
+  if (!message) {
+    showToast("That excerpt is no longer available to analyse.");
+    closeAnalysisPage();
+    return;
+  }
+
+  if (findOverlappingAnalysis(message.analyses || [], selection.startOffset, selection.endOffset)) {
+    showToast("Remove the current analysis highlight on this span before running a new one.");
+    return;
+  }
+
+  const pendingAnalyses = getPendingAnalysesForMessage(conversation.id, message.id);
+  if (findOverlappingPendingAnalysis(pendingAnalyses, selection.startOffset, selection.endOffset)) {
+    return;
+  }
+
+  const pendingAnalysis = createPendingAnalysis({
+    conversationId: conversation.id,
+    messageId: message.id,
+    prompt: analysisPrompt,
+    selectedText: selection.selectedText,
+    startOffset: selection.startOffset,
+    endOffset: selection.endOffset,
+  });
+  ui.pendingAnalyses.push(pendingAnalysis);
+  closeAnalysisPage();
+  render();
+
+  try {
+    const segments = await requestSelectionAnalysis(selection.selectedText, analysisPrompt, selection.startOffset);
+    if (!segments.length) {
+      showToast(`No strong matches found for "${truncate(normalizeWhitespace(analysisPrompt), 36)}".`);
+      return;
+    }
+
+    message.analyses = message.analyses || [];
+    message.analyses.push(
+      createAnalysis({
+        prompt: analysisPrompt,
+        selectedText: selection.selectedText,
+        startOffset: selection.startOffset,
+        endOffset: selection.endOffset,
+        segments,
+      }),
+    );
+    touchConversation(conversation);
+    saveState();
+    render();
+    showToast(`Applied "${truncate(normalizeWhitespace(analysisPrompt), 28)}" analysis.`);
+  } catch (error) {
+    showToast(error.message || "The analysis request failed.");
+  } finally {
+    ui.pendingAnalyses = ui.pendingAnalyses.filter((analysis) => analysis.id !== pendingAnalysis.id);
+    saveState();
+    render();
+  }
+}
+
 function appendMessageListToInput(target, messages) {
   messages.forEach((message) => {
     target.push({
@@ -1124,6 +1206,7 @@ function render() {
   renderLandingPage();
   renderSettings();
   renderFavorites();
+  renderAnalysisPage();
   renderPricing();
   renderSidebar();
   renderHeader();
@@ -1157,7 +1240,7 @@ function renderSettings() {
   dom.settingsPage.classList.toggle("hidden", !showSettings);
   dom.settingsPage.setAttribute("aria-hidden", String(!showSettings));
   dom.openSettingsButton.setAttribute("aria-expanded", String(ui.settingsOpen));
-  document.body.classList.toggle("settings-open", showSettings || ui.favoritesOpen);
+  document.body.classList.toggle("settings-open", showSettings || ui.favoritesOpen || ui.analysisOpen);
 }
 
 function renderFavorites() {
@@ -1165,7 +1248,7 @@ function renderFavorites() {
   dom.favoritesPage.classList.toggle("hidden", !showFavorites);
   dom.favoritesPage.setAttribute("aria-hidden", String(!showFavorites));
   dom.openFavoritesButton.setAttribute("aria-expanded", String(ui.favoritesOpen));
-  document.body.classList.toggle("settings-open", showFavorites || ui.settingsOpen);
+  document.body.classList.toggle("settings-open", showFavorites || ui.settingsOpen || ui.analysisOpen);
 
   dom.favoritesList.innerHTML = "";
   const favorites = [...(state.favorites || [])].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -1221,6 +1304,22 @@ function renderFavorites() {
   });
 }
 
+function renderAnalysisPage() {
+  const showAnalysis = ui.appEntered && ui.analysisOpen;
+  const pending = isAnalysisPending();
+
+  dom.analysisPage.classList.toggle("hidden", !showAnalysis);
+  dom.analysisPage.setAttribute("aria-hidden", String(!showAnalysis));
+  dom.analysisInput.value = ui.analysisDraft;
+  dom.analysisInput.disabled = pending;
+  dom.analysisSelectionPreview.textContent = ui.analysisSelection?.selectedText || "No excerpt selected.";
+  dom.analysisSubmitButton.disabled = pending || !ui.analysisSelection;
+  dom.analysisSubmitButton.textContent = pending ? "Analysing..." : "Analyse";
+  dom.analysisCancelButton.disabled = pending;
+  dom.closeAnalysisButton.disabled = pending;
+  document.body.classList.toggle("settings-open", showAnalysis || ui.settingsOpen || ui.favoritesOpen);
+}
+
 function renderLandingPage() {
   dom.landingStage.innerHTML = "";
   dom.landingStage.appendChild(buildLandingHero());
@@ -1229,7 +1328,11 @@ function renderLandingPage() {
 function openSettingsPage() {
   ui.settingsOpen = true;
   ui.favoritesOpen = false;
+  ui.analysisOpen = false;
+  ui.analysisDraft = "";
+  ui.analysisSelection = null;
   renderFavorites();
+  renderAnalysisPage();
   renderSettings();
   window.requestAnimationFrame(() => {
     dom.apiKeyInput.focus();
@@ -1244,7 +1347,11 @@ function closeSettingsPage() {
 function openFavoritesPage() {
   ui.favoritesOpen = true;
   ui.settingsOpen = false;
+  ui.analysisOpen = false;
+  ui.analysisDraft = "";
+  ui.analysisSelection = null;
   renderSettings();
+  renderAnalysisPage();
   renderFavorites();
   window.requestAnimationFrame(() => {
     dom.closeFavoritesButton.focus();
@@ -1254,6 +1361,27 @@ function openFavoritesPage() {
 function closeFavoritesPage() {
   ui.favoritesOpen = false;
   renderFavorites();
+}
+
+function openAnalysisPage(selection) {
+  ui.analysisOpen = true;
+  ui.analysisSelection = selection ? { ...selection } : null;
+  ui.analysisDraft = "";
+  ui.settingsOpen = false;
+  ui.favoritesOpen = false;
+  renderSettings();
+  renderFavorites();
+  renderAnalysisPage();
+  window.requestAnimationFrame(() => {
+    dom.analysisInput.focus();
+  });
+}
+
+function closeAnalysisPage() {
+  ui.analysisOpen = false;
+  ui.analysisDraft = "";
+  ui.analysisSelection = null;
+  renderAnalysisPage();
 }
 
 function renderPricing() {
@@ -1492,6 +1620,8 @@ function renderMessageList(messages, threadPath) {
 }
 
 function renderMessage(message, threadPath) {
+  const conversation = getActiveConversation();
+  const pendingAnalyses = conversation ? getPendingAnalysesForMessage(conversation.id, message.id) : [];
   const wrapper = document.createElement("article");
   wrapper.className = `message ${message.role}`;
   wrapper.dataset.messageId = message.id;
@@ -1513,11 +1643,6 @@ function renderMessage(message, threadPath) {
 
   meta.append(role, time);
 
-  const analysisActions = renderMessageAnalysisActions(message);
-  if (analysisActions) {
-    meta.appendChild(analysisActions);
-  }
-
   const body = document.createElement("div");
   body.className = "message-text";
   body.dataset.messageId = message.id;
@@ -1532,57 +1657,17 @@ function renderMessage(message, threadPath) {
         message.compactions || [],
         getMessageFavorites(getActiveConversation()?.id, message.id),
         message.analyses || [],
+        pendingAnalyses,
       ),
     );
   } else {
-    body.appendChild(buildFormattedTextFragment(message.content, [], threadPath, message.compactions || [], [], []));
+    body.appendChild(buildFormattedTextFragment(message.content, [], threadPath, message.compactions || [], [], [], []));
   }
 
   shell.append(meta, body);
   wrapper.appendChild(shell);
 
   return wrapper;
-}
-
-function renderMessageAnalysisActions(message) {
-  const conversation = getActiveConversation();
-  if (!conversation) {
-    return null;
-  }
-
-  const actions = document.createElement("div");
-  actions.className = "message-meta-actions";
-
-  const analyses = message.analyses || [];
-  analyses.forEach((analysis) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "message-analysis-chip";
-    button.dataset.removeAnalysisId = analysis.id;
-    button.dataset.tooltip = `Remove "${truncate(normalizeWhitespace(analysis.prompt), 28)}" analysis`;
-    button.setAttribute("aria-label", `Remove ${analysis.prompt} analysis`);
-
-    const label = document.createElement("span");
-    label.className = "message-analysis-chip-label";
-    label.textContent = truncate(normalizeWhitespace(analysis.prompt), 24);
-
-    const close = document.createElement("span");
-    close.className = "message-analysis-chip-close";
-    close.setAttribute("aria-hidden", "true");
-    close.textContent = "x";
-
-    button.append(label, close);
-    actions.appendChild(button);
-  });
-
-  if (ui.pendingAnalyses.has(makeAnalysisScopeKey(conversation.id, message.id))) {
-    const status = document.createElement("span");
-    status.className = "message-analysis-status";
-    status.textContent = "Analysing...";
-    actions.appendChild(status);
-  }
-
-  return actions.childNodes.length ? actions : null;
 }
 
 function renderThread(thread, threadPath) {
@@ -1824,14 +1909,14 @@ function autosizeTextarea(textarea) {
   textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
 }
 
-function buildFormattedTextFragment(text, threads, threadPath = [], compactions = [], favorites = [], analyses = []) {
+function buildFormattedTextFragment(text, threads, threadPath = [], compactions = [], favorites = [], analyses = [], pendingAnalyses = []) {
   const container = document.createElement("div");
   container.className = "markdown-content";
   container.appendChild(buildMarkdownFragment(text));
 
   applyInlineDecorations(container, threads, threadPath, compactions, favorites);
   refreshCompactOnlyMarkdownBlocks(container);
-  applyAnalysisDecorations(container, analyses);
+  applyAnalysisDecorations(container, analyses, pendingAnalyses);
 
   const fragment = document.createDocumentFragment();
   while (container.firstChild) {
@@ -2099,20 +2184,32 @@ function applyInlineDecorations(container, threads, threadPath, compactions = []
   });
 }
 
-function applyAnalysisDecorations(container, analyses = []) {
+function applyAnalysisDecorations(container, analyses = [], pendingAnalyses = []) {
+  const inlineControlsRendered = new Set();
   const segments = (analyses || [])
     .flatMap((analysis) =>
       (analysis.segments || []).map((segment) => ({
         ...segment,
         analysisId: analysis.id,
         prompt: analysis.prompt,
+        polarity: segment.polarity === "negative" ? "negative" : "positive",
       })),
     )
     .sort((a, b) => b.startOffset - a.startOffset || b.endOffset - a.endOffset);
 
   segments.forEach((segment) => {
-    renderAnalysisSegmentIntoMarkdown(container, segment);
+    renderAnalysisSegmentIntoMarkdown(container, segment, {
+      addInlineControl: !inlineControlsRendered.has(segment.analysisId),
+    });
+    inlineControlsRendered.add(segment.analysisId);
   });
+
+  (pendingAnalyses || [])
+    .slice()
+    .sort((a, b) => b.startOffset - a.startOffset || b.endOffset - a.endOffset)
+    .forEach((pendingAnalysis) => {
+      renderPendingAnalysisIntoMarkdown(container, pendingAnalysis);
+    });
 }
 
 function renderFavoriteIntoMarkdown(container, favorite) {
@@ -2242,7 +2339,7 @@ function collapseCompactedMarkdownListItems(list) {
   });
 }
 
-function renderAnalysisSegmentIntoMarkdown(container, segment) {
+function renderAnalysisSegmentIntoMarkdown(container, segment, options = {}) {
   const start = locateRenderableTextPosition(container, segment.startOffset, "start");
   const end = locateRenderableTextPosition(container, segment.endOffset, "end");
   if (!start || !end) {
@@ -2259,15 +2356,86 @@ function renderAnalysisSegmentIntoMarkdown(container, segment) {
     return;
   }
 
+  let lastMark = null;
   textNodes.forEach((node) => {
+    if (!hasVisibleText(node.data)) {
+      return;
+    }
+
     const mark = document.createElement("span");
-    mark.className = "analysis-highlight";
+    mark.className = [
+      "analysis-highlight",
+      segment.polarity === "negative" ? "analysis-highlight--negative" : "analysis-highlight--positive",
+    ].join(" ");
     mark.dataset.analysisId = segment.analysisId;
     mark.dataset.analysisPrompt = segment.prompt;
+    mark.dataset.analysisPolarity = segment.polarity;
     mark.style.setProperty("--analysis-strength", clamp(segment.score, 0.12, 1).toFixed(2));
     mark.textContent = node.data;
     node.replaceWith(mark);
+    lastMark = mark;
   });
+
+  if (options.addInlineControl && lastMark) {
+    lastMark.after(buildAnalysisInlineControl(segment));
+  }
+}
+
+function renderPendingAnalysisIntoMarkdown(container, pendingAnalysis) {
+  const start = locateRenderableTextPosition(container, pendingAnalysis.startOffset, "start");
+  const end = locateRenderableTextPosition(container, pendingAnalysis.endOffset, "end");
+  if (!start || !end) {
+    return;
+  }
+
+  const isolated = isolateRenderableTextRange(start, end);
+  if (!isolated) {
+    return;
+  }
+
+  const textNodes = collectRenderableTextNodes(container, isolated.startNode, isolated.endNode);
+  if (!textNodes.length) {
+    return;
+  }
+
+  let lastMark = null;
+  textNodes.forEach((node) => {
+    if (!hasVisibleText(node.data)) {
+      return;
+    }
+
+    const mark = document.createElement("span");
+    mark.className = "analysis-highlight analysis-highlight--pending";
+    mark.dataset.pendingAnalysisId = pendingAnalysis.id;
+    mark.dataset.analysisPrompt = pendingAnalysis.prompt;
+    mark.textContent = node.data;
+    node.replaceWith(mark);
+    lastMark = mark;
+  });
+
+  if (!lastMark) {
+    return;
+  }
+
+  const status = document.createElement("span");
+  status.className = "analysis-inline-status";
+  status.dataset.decorationGenerated = "true";
+  status.textContent = "Analysing";
+  status.dataset.tooltip = `Analysing "${truncate(normalizeWhitespace(pendingAnalysis.prompt), 28)}"`;
+  status.setAttribute("aria-label", `Analysing ${pendingAnalysis.prompt}`);
+  lastMark.after(status);
+}
+
+function buildAnalysisInlineControl(segment) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "analysis-inline-action";
+  button.dataset.decorationGenerated = "true";
+  button.dataset.removeAnalysisId = segment.analysisId;
+  button.dataset.tooltip = `Remove "${truncate(normalizeWhitespace(segment.prompt), 28)}" analysis`;
+  button.setAttribute("aria-label", `Remove ${segment.prompt} analysis`);
+  button.textContent = "x";
+  return button;
 }
 
 function renderThreadAnchorIntoMarkdown(container, thread, threadPath) {
@@ -2333,7 +2501,7 @@ function createRenderableTextWalker(root) {
         return NodeFilter.FILTER_REJECT;
       }
 
-      if (node.parentElement?.closest("[data-thread-generated='true'], .thread-card")) {
+      if (node.parentElement?.closest("[data-thread-generated='true'], [data-decoration-generated='true'], .thread-card")) {
         return NodeFilter.FILTER_REJECT;
       }
 
@@ -2604,7 +2772,7 @@ function isCompactionToggleNode(node) {
 }
 
 function isZeroLengthSourceNode(node) {
-  return node.matches?.(".thread-card, button[data-thread-toggle]");
+  return node.matches?.(".thread-card, button[data-thread-toggle], [data-decoration-generated='true']");
 }
 
 function findOverlappingThread(threads, startOffset, endOffset) {
@@ -2647,6 +2815,10 @@ function getPlainText(value) {
   const container = document.createElement("div");
   container.appendChild(buildMarkdownFragment(value));
   return container.textContent || "";
+}
+
+function hasVisibleText(value) {
+  return /\S/.test(value);
 }
 
 function parseThreadPath(path) {
@@ -2720,6 +2892,19 @@ function createAnalysis({ prompt, selectedText, startOffset, endOffset, segments
     startOffset,
     endOffset,
     segments,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function createPendingAnalysis({ conversationId, messageId, prompt, selectedText, startOffset, endOffset }) {
+  return {
+    id: crypto.randomUUID(),
+    conversationId,
+    messageId,
+    prompt,
+    selectedText,
+    startOffset,
+    endOffset,
     createdAt: new Date().toISOString(),
   };
 }
@@ -2829,8 +3014,30 @@ function makeScopeKey(conversationId, threadPath) {
   return `${conversationId}:${threadPath.join(">") || "root"}`;
 }
 
-function makeAnalysisScopeKey(conversationId, messageId) {
-  return `${conversationId}:analysis:${messageId}`;
+function isAnalysisPending(selection = ui.analysisSelection) {
+  const conversation = getActiveConversation();
+  if (!selection || !conversation) {
+    return false;
+  }
+
+  return getPendingAnalysesForMessage(conversation.id, selection.messageId).some(
+    (analysis) =>
+      analysis.startOffset === selection.startOffset &&
+      analysis.endOffset === selection.endOffset &&
+      normalizeWhitespace(analysis.selectedText) === normalizeWhitespace(selection.selectedText),
+  );
+}
+
+function getPendingAnalysesForMessage(conversationId, messageId) {
+  return (ui.pendingAnalyses || []).filter(
+    (analysis) => analysis.conversationId === conversationId && analysis.messageId === messageId,
+  );
+}
+
+function findOverlappingPendingAnalysis(pendingAnalyses, startOffset, endOffset) {
+  return (pendingAnalyses || []).find(
+    (analysis) => analysis.startOffset < endOffset && analysis.endOffset > startOffset,
+  );
 }
 
 function supportsReasoning(model) {
@@ -3017,6 +3224,10 @@ function normalizeAnalysisSegments(source, selectedText, baseOffset) {
           : Number.isFinite(segment?.strength)
             ? Number(segment.strength)
             : NaN,
+      polarity:
+        segment?.polarity === "negative" || segment?.label === "negative" || segment?.sentiment === "negative"
+          ? "negative"
+          : "positive",
     }))
     .sort((a, b) => a.start - b.start || a.end - b.end)
     .forEach((segment) => {
@@ -3030,19 +3241,132 @@ function normalizeAnalysisSegments(source, selectedText, baseOffset) {
         return;
       }
 
-      if (!selectedText.slice(boundedStart, boundedEnd).trim()) {
+      const visibleBounds = getVisibleTextBounds(selectedText, boundedStart, boundedEnd);
+      if (!visibleBounds) {
         return;
       }
 
       result.push({
-        startOffset: baseOffset + boundedStart,
-        endOffset: baseOffset + boundedEnd,
+        startOffset: baseOffset + visibleBounds.start,
+        endOffset: baseOffset + visibleBounds.end,
         score: clamp(Number.isFinite(segment.score) ? segment.score : 0.5, 0.08, 1),
+        polarity: segment.polarity,
       });
-      lastEnd = boundedEnd;
+      lastEnd = visibleBounds.end;
     });
 
-  return result;
+  return mergeAnalysisSegments(fillAnalysisCoverage(result, selectedText, baseOffset), selectedText, baseOffset);
+}
+
+function fillAnalysisCoverage(segments, selectedText, baseOffset) {
+  const completed = [];
+  let cursor = 0;
+
+  segments.forEach((segment, index) => {
+    if (segment.startOffset > baseOffset + cursor) {
+      completed.push(
+        ...buildCoverageGapSegments(
+          selectedText,
+          cursor,
+          segment.startOffset - baseOffset,
+          segment.polarity,
+          index > 0 ? segments[index - 1].polarity : "positive",
+          baseOffset,
+        ),
+      );
+    }
+
+    completed.push(segment);
+    cursor = Math.max(cursor, segment.endOffset - baseOffset);
+  });
+
+  if (cursor < selectedText.length) {
+    completed.push(
+      ...buildCoverageGapSegments(
+        selectedText,
+        cursor,
+        selectedText.length,
+        segments.length ? segments[segments.length - 1].polarity : "positive",
+        segments.length ? segments[segments.length - 1].polarity : "positive",
+        baseOffset,
+      ),
+    );
+  }
+
+  return completed;
+}
+
+function mergeAnalysisSegments(segments, selectedText, baseOffset) {
+  if (!segments.length) {
+    return [];
+  }
+
+  const merged = [];
+
+  segments.forEach((segment) => {
+    const previous = merged[merged.length - 1];
+    if (!previous || previous.polarity !== segment.polarity) {
+      merged.push({ ...segment });
+      return;
+    }
+
+    const gapStart = previous.endOffset - baseOffset;
+    const gapEnd = segment.startOffset - baseOffset;
+    const gapText = selectedText.slice(gapStart, gapEnd);
+    const containsBlankLine = /\n\s*\n/.test(gapText);
+    const isWhitespaceOnlyGap = !hasVisibleText(gapText);
+
+    if (segment.startOffset <= previous.endOffset || (isWhitespaceOnlyGap && !containsBlankLine)) {
+      previous.endOffset = Math.max(previous.endOffset, segment.endOffset);
+      previous.score = Math.max(previous.score, segment.score);
+      return;
+    }
+
+    merged.push({ ...segment });
+  });
+
+  return merged;
+}
+
+function buildCoverageGapSegments(selectedText, start, end, nextPolarity, previousPolarity, baseOffset) {
+  if (end <= start) {
+    return [];
+  }
+
+  const visibleBounds = getVisibleTextBounds(selectedText, start, end);
+  if (!visibleBounds) {
+    return [];
+  }
+
+  return [
+    {
+      startOffset: baseOffset + visibleBounds.start,
+      endOffset: baseOffset + visibleBounds.end,
+      score: 0.18,
+      polarity: nextPolarity || previousPolarity || "positive",
+    },
+  ];
+}
+
+function getVisibleTextBounds(text, start, end) {
+  const slice = text.slice(start, end);
+  if (!hasVisibleText(slice)) {
+    return null;
+  }
+
+  const leadingWhitespace = slice.match(/^\s*/)?.[0].length || 0;
+  const trailingWhitespace = slice.match(/\s*$/)?.[0].length || 0;
+  const visibleStart = start + leadingWhitespace;
+  const visibleEnd = end - trailingWhitespace;
+
+  if (visibleEnd <= visibleStart) {
+    return null;
+  }
+
+  return {
+    start: visibleStart,
+    end: visibleEnd,
+  };
 }
 
 function parseJsonResponse(text) {

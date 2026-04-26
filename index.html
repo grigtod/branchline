@@ -165,6 +165,47 @@
     </section>
   </div>
 
+  <div id="analysis-page" class="settings-page hidden" aria-hidden="true">
+    <div id="analysis-backdrop" class="settings-backdrop"></div>
+    <section class="settings-panel analysis-panel" role="dialog" aria-modal="true" aria-labelledby="analysis-title">
+      <header class="settings-header">
+        <div>
+          <p class="workspace-eyebrow">Analyse</p>
+          <h2 id="analysis-title">Analyse this excerpt</h2>
+          <p class="settings-intro">
+            Describe the lens you want to use, then Branchline will highlight the parts of the selected passage that match it most strongly.
+          </p>
+        </div>
+        <button id="close-analysis-button" class="ghost-button icon-button" type="button" aria-label="Close analysis" title="Close analysis">
+          <img class="button-icon-image" src="assets/close-fill.svg" alt="" aria-hidden="true">
+        </button>
+      </header>
+
+      <form id="analysis-form" class="analysis-form">
+        <div class="control-group">
+          <label for="analysis-input">Analysis prompt</label>
+          <textarea
+            id="analysis-input"
+            class="analysis-input"
+            rows="5"
+            placeholder="What should Branchline look for in this text?"
+          ></textarea>
+          <p class="settings-note">Try prompts like: hidden assumptions, emotional tone, contradictions, strongest evidence, or persuasive tactics.</p>
+        </div>
+
+        <div class="control-group">
+          <label>Selected excerpt</label>
+          <p id="analysis-selection-preview" class="analysis-selection-preview"></p>
+        </div>
+
+        <div class="analysis-actions">
+          <button id="analysis-cancel-button" class="ghost-button" type="button">Cancel</button>
+          <button id="analysis-submit-button" class="primary-button analysis-submit-button" type="submit">Analyse</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
   <div id="selection-menu" class="selection-menu hidden" aria-hidden="true">
     <button
       class="selection-action-button selection-action-button--compact"
@@ -216,6 +257,11 @@
   <div id="button-tooltip" class="button-tooltip hidden" aria-hidden="true"></div>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
+  <script
+    data-goatcounter="https://branchline.goatcounter.com/count"
+    async
+    src="//gc.zgo.at/count.js"
+  ></script>
   <script src="app.js"></script>
 </body>
 </html>
