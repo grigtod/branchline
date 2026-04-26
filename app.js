@@ -26,6 +26,7 @@ const dom = {
   enterAppButton: document.getElementById("enter-app-button"),
   appShell: document.getElementById("app-shell"),
   sidebar: document.getElementById("sidebar"),
+  workspace: document.querySelector(".workspace"),
   newChatButton: document.getElementById("new-chat-button"),
   collapseSidebarButton: document.getElementById("collapse-sidebar-button"),
   expandSidebarButton: document.getElementById("expand-sidebar-button"),
@@ -80,6 +81,17 @@ const ui = {
   hoveredTooltipButton: null,
   toastTimers: [],
   toasts: [],
+  motionEnabled: true,
+  landingEntrancePending: ENABLE_LANDING_PAGE,
+  appShellEntrancePending: !ENABLE_LANDING_PAGE,
+  activeConversationMotionPending: !ENABLE_LANDING_PAGE,
+  previousConversationIds: new Set(),
+  previousFavoriteIds: new Set(),
+  previousMessageIds: new Set(),
+  previousThreadIds: new Set(),
+  previousActiveConversationId: null,
+  forceConversationMotion: false,
+  motionOrder: 0,
 };
 
 let state = loadState();
@@ -87,8 +99,27 @@ let state = loadState();
 init();
 
 function init() {
+  initMotionPreference();
   bindEvents();
   render();
+}
+
+function initMotionPreference() {
+  const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+  ui.motionEnabled = !mediaQuery.matches;
+
+  const handleChange = (event) => {
+    ui.motionEnabled = !event.matches;
+  };
+
+  if (typeof mediaQuery.addEventListener === "function") {
+    mediaQuery.addEventListener("change", handleChange);
+    return;
+  }
+
+  if (typeof mediaQuery.addListener === "function") {
+    mediaQuery.addListener(handleChange);
+  }
 }
 
 function bindEvents() {
@@ -138,6 +169,7 @@ function handleNewChat() {
   const conversation = createConversation();
   state.conversations.unshift(conversation);
   state.activeConversationId = conversation.id;
+  ui.activeConversationMotionPending = true;
   saveState();
   clearSelectionMenu();
   render();
@@ -151,6 +183,8 @@ function handleEnterApp() {
   ui.analysisOpen = false;
   ui.analysisDraft = "";
   ui.analysisSelection = null;
+  ui.appShellEntrancePending = true;
+  ui.activeConversationMotionPending = true;
   render();
   window.requestAnimationFrame(() => {
     dom.rootInput.focus();
@@ -186,16 +220,23 @@ async function handleToggleFullscreen() {
   }
 }
 
-function handleConversationListClick(event) {
+async function handleConversationListClick(event) {
   const deleteButton = event.target.closest("[data-delete-conversation-id]");
   if (deleteButton) {
     const conversationId = deleteButton.dataset.deleteConversationId;
+    const previousActiveConversationId = state.activeConversationId;
+    deleteButton.disabled = true;
+    await animateElementOut(deleteButton.closest(".conversation-card"));
     const remaining = state.conversations.filter((conversation) => conversation.id !== conversationId);
     state.conversations = remaining.length ? remaining : [createConversation()];
     state.favorites = (state.favorites || []).filter((favorite) => favorite.conversationId !== conversationId);
 
     if (state.activeConversationId === conversationId || !state.conversations.some((conversation) => conversation.id === state.activeConversationId)) {
       state.activeConversationId = state.conversations[0].id;
+    }
+
+    if (state.activeConversationId !== previousActiveConversationId) {
+      ui.activeConversationMotionPending = true;
     }
 
     clearSelectionMenu();
@@ -209,7 +250,12 @@ function handleConversationListClick(event) {
     return;
   }
 
+  if (state.activeConversationId === button.dataset.conversationId) {
+    return;
+  }
+
   state.activeConversationId = button.dataset.conversationId;
+  ui.activeConversationMotionPending = true;
   clearSelectionMenu();
   saveState();
   render();
@@ -268,7 +314,7 @@ function handleDocumentKeydown(event) {
   }
 }
 
-function handleChatViewClick(event) {
+async function handleChatViewClick(event) {
   const conversation = getActiveConversation();
   if (!conversation) {
     return;
@@ -276,6 +322,8 @@ function handleChatViewClick(event) {
 
   const deleteThreadButton = event.target.closest("[data-delete-thread-id]");
   if (deleteThreadButton) {
+    deleteThreadButton.disabled = true;
+    await animateElementOut(deleteThreadButton.closest(".thread-card"));
     const didDelete = removeThreadById(conversation.messages, deleteThreadButton.dataset.deleteThreadId);
     if (didDelete) {
       touchConversation(conversation);
@@ -289,6 +337,8 @@ function handleChatViewClick(event) {
 
   const compactToggle = event.target.closest("[data-compaction-toggle]");
   if (compactToggle) {
+    compactToggle.disabled = true;
+    await animateElementOut(compactToggle);
     const messageElement = compactToggle.closest(".message");
     const message = messageElement ? findMessageById(conversation.messages, messageElement.dataset.messageId) : null;
     if (message) {
@@ -306,6 +356,8 @@ function handleChatViewClick(event) {
 
   const removeAnalysisButton = event.target.closest("[data-remove-analysis-id]");
   if (removeAnalysisButton) {
+    removeAnalysisButton.disabled = true;
+    await animateElementOut(removeAnalysisButton);
     const messageElement = removeAnalysisButton.closest(".message");
     const message = messageElement ? findMessageById(conversation.messages, messageElement.dataset.messageId) : null;
     if (message) {
@@ -532,12 +584,14 @@ function handleGlobalViewportChange() {
   hideButtonTooltip();
 }
 
-function handleFavoritesListClick(event) {
+async function handleFavoritesListClick(event) {
   const deleteButton = event.target.closest("[data-delete-favorite-id]");
   if (!deleteButton) {
     return;
   }
 
+  deleteButton.disabled = true;
+  await animateElementOut(deleteButton.closest(".favorite-card"));
   state.favorites = (state.favorites || []).filter((favorite) => favorite.id !== deleteButton.dataset.deleteFavoriteId);
   saveState();
   render();
@@ -1216,6 +1270,7 @@ function render() {
   syncButtonTooltips();
   autosizeAllTextareas();
   flushPendingScroll();
+  finalizeMotionState();
 }
 
 function renderAppFrame() {
@@ -1227,6 +1282,12 @@ function renderAppFrame() {
   dom.collapseSidebarButton.classList.toggle("hidden", ui.sidebarCollapsed);
   dom.expandSidebarButton.classList.toggle("hidden", !ui.sidebarCollapsed);
   dom.expandSidebarButton.setAttribute("aria-hidden", String(!ui.sidebarCollapsed));
+
+  if (!showLandingPage && ui.appShellEntrancePending) {
+    markForEnter(dom.sidebar, 0, "panel");
+    markForEnter(dom.workspace, 2, "panel");
+    markForEnter(dom.newChatButton, 4, "pop");
+  }
 }
 
 function renderSettings() {
@@ -1244,7 +1305,9 @@ function renderSettings() {
 }
 
 function renderFavorites() {
+  const wasHidden = dom.favoritesPage.classList.contains("hidden");
   const showFavorites = ui.appEntered && ui.favoritesOpen;
+  const shouldAnimateFavorites = showFavorites && wasHidden;
   dom.favoritesPage.classList.toggle("hidden", !showFavorites);
   dom.favoritesPage.setAttribute("aria-hidden", String(!showFavorites));
   dom.openFavoritesButton.setAttribute("aria-expanded", String(ui.favoritesOpen));
@@ -1261,9 +1324,10 @@ function renderFavorites() {
     return;
   }
 
-  favorites.forEach((favorite) => {
+  favorites.forEach((favorite, index) => {
     const card = document.createElement("article");
     card.className = "favorite-card";
+    maybeAnimateTrackedEntry(card, favorite.id, ui.previousFavoriteIds, "panel", index + 2, shouldAnimateFavorites);
 
     const top = document.createElement("div");
     top.className = "favorite-card-top";
@@ -1407,11 +1471,12 @@ function renderSidebar() {
   const activeId = state.activeConversationId;
   const conversations = [...state.conversations].sort(sortByUpdatedAt);
 
-  conversations.forEach((conversation) => {
+  conversations.forEach((conversation, index) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `conversation-card${conversation.id === activeId ? " active" : ""}`;
     button.dataset.conversationId = conversation.id;
+    maybeAnimateTrackedEntry(button, conversation.id, ui.previousConversationIds, "soft", index + 5, ui.appShellEntrancePending);
 
     const title = document.createElement("span");
     title.className = "conversation-title";
@@ -1487,12 +1552,18 @@ function renderHeader() {
   statusTop.append(chips, controls);
   status.append(statusTop);
   titleWrap.append(meta);
+  if (ui.appShellEntrancePending || ui.activeConversationMotionPending) {
+    markForEnter(titleWrap, 5, "rise");
+    markForEnter(status, 7, "soft");
+  }
   dom.chatHeader.append(titleWrap, status);
   dom.chatHeader.classList.toggle("hidden", false);
 }
 
 function renderConversation() {
   const conversation = getActiveConversation();
+  ui.forceConversationMotion = ui.appShellEntrancePending || ui.activeConversationMotionPending;
+  ui.motionOrder = 0;
   dom.chatView.innerHTML = "";
   dom.rootInput.value = conversation?.draft || "";
   const rootPending = conversation ? ui.pendingScopes.has(makeScopeKey(conversation.id, [])) : false;
@@ -1506,6 +1577,9 @@ function renderConversation() {
       : "Continue the conversation";
 
   if (!conversation || conversation.messages.length === 0) {
+    if (ui.appShellEntrancePending || ui.activeConversationMotionPending) {
+      markForEnter(dom.rootComposer, 9, "panel");
+    }
     return;
   }
 
@@ -1518,6 +1592,9 @@ function renderConversation() {
   }
 
   dom.chatView.appendChild(stack);
+  if (ui.appShellEntrancePending || ui.activeConversationMotionPending) {
+    markForEnter(dom.rootComposer, ui.motionOrder + 8, "panel");
+  }
 }
 
 function buildLandingHero() {
@@ -1550,6 +1627,11 @@ function buildLandingHero() {
 
   titleRow.append(titleMark, title);
   intro.append(titleRow, definition, explanation);
+  if (ui.landingEntrancePending) {
+    markForEnter(titleRow, 0, "hero");
+    markForEnter(definition, 2, "rise");
+    markForEnter(explanation, 3, "soft");
+  }
 
   const grid = document.createElement("div");
   grid.className = "landing-grid";
@@ -1583,6 +1665,13 @@ function buildLandingHero() {
 
   const ctaPanel = document.createElement("div");
   ctaPanel.className = "landing-cta-panel";
+  if (ui.landingEntrancePending) {
+    markForEnter(howItWorks, 4, "panel");
+    markForEnter(whyItHelps, 5, "panel");
+    markForEnter(bestFor, 6, "panel");
+    markForEnter(ctaPanel, 7, "rise");
+    markForEnter(dom.enterAppButton, 8, "pop");
+  }
   ctaPanel.appendChild(dom.enterAppButton);
 
   grid.append(howItWorks, whyItHelps, bestFor);
@@ -1627,6 +1716,14 @@ function renderMessage(message, threadPath) {
   wrapper.dataset.messageId = message.id;
   wrapper.dataset.role = message.role;
   wrapper.dataset.threadPath = threadPath.join("|");
+  maybeAnimateTrackedEntry(
+    wrapper,
+    message.id,
+    ui.previousMessageIds,
+    message.role === "assistant" ? "rise" : "pop",
+    ui.motionOrder,
+    ui.forceConversationMotion,
+  );
 
   const shell = document.createElement("div");
   shell.className = "message-shell";
@@ -1674,6 +1771,7 @@ function renderThread(thread, threadPath) {
   const section = document.createElement("section");
   section.className = `thread-card inline-thread ${thread.kind === "debate" ? "thread-card--debate" : ""}`.trim();
   section.id = `thread-${thread.id}`;
+  maybeAnimateTrackedEntry(section, thread.id, ui.previousThreadIds, "panel", ui.motionOrder, ui.forceConversationMotion);
 
   const header = document.createElement("div");
   header.className = "thread-header";
@@ -1863,11 +1961,94 @@ function hideButtonTooltip() {
 
 function renderToasts() {
   dom.toastRegion.innerHTML = "";
-  ui.toasts.forEach((toast) => {
+  ui.toasts.forEach((toast, index) => {
     const item = document.createElement("div");
     item.className = "toast";
     item.textContent = toast.message;
+    markForEnter(item, index, "soft");
     dom.toastRegion.appendChild(item);
+  });
+}
+
+function markForEnter(element, order = 0, variant = "rise") {
+  if (!ui.motionEnabled || !element) {
+    return;
+  }
+
+  element.classList.add("motion-enter", `motion-enter--${variant}`);
+  element.style.setProperty("--enter-delay", `${Math.max(0, order) * 55}ms`);
+}
+
+function maybeAnimateTrackedEntry(element, key, previousSet, variant = "rise", order = 0, forceAll = false) {
+  if (!forceAll && previousSet.has(key)) {
+    return;
+  }
+
+  markForEnter(element, order, variant);
+  ui.motionOrder += 1;
+}
+
+function animateElementOut(element) {
+  if (!ui.motionEnabled || !element) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      element.removeEventListener("transitionend", handleTransitionEnd);
+      resolve();
+    };
+    const handleTransitionEnd = (event) => {
+      if (event.target !== element) {
+        return;
+      }
+
+      finish();
+    };
+
+    element.addEventListener("transitionend", handleTransitionEnd);
+    window.requestAnimationFrame(() => {
+      element.classList.add("motion-exit");
+    });
+    window.setTimeout(finish, 320);
+  });
+}
+
+function finalizeMotionState() {
+  ui.previousConversationIds = new Set(state.conversations.map((conversation) => conversation.id));
+  ui.previousFavoriteIds = new Set((state.favorites || []).map((favorite) => favorite.id));
+
+  const activeConversation = getActiveConversation();
+  const messageIds = new Set();
+  const threadIds = new Set();
+
+  if (activeConversation) {
+    collectRenderableIds(activeConversation.messages, messageIds, threadIds);
+  }
+
+  ui.previousMessageIds = messageIds;
+  ui.previousThreadIds = threadIds;
+  ui.previousActiveConversationId = activeConversation?.id || null;
+  ui.forceConversationMotion = false;
+  ui.motionOrder = 0;
+  ui.landingEntrancePending = false;
+  ui.appShellEntrancePending = false;
+  ui.activeConversationMotionPending = false;
+}
+
+function collectRenderableIds(messages, messageIds, threadIds) {
+  (messages || []).forEach((message) => {
+    messageIds.add(message.id);
+    (message.threads || []).forEach((thread) => {
+      threadIds.add(thread.id);
+      collectRenderableIds(thread.messages, messageIds, threadIds);
+    });
   });
 }
 

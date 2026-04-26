@@ -25,6 +25,7 @@
   --radius-lg: 22px;
   --radius-md: 16px;
   --radius-sm: 12px;
+  --motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 * {
@@ -65,6 +66,46 @@ button {
 
 .hidden {
   display: none !important;
+}
+
+.motion-enter {
+  --enter-delay: 0ms;
+  animation-duration: 720ms;
+  animation-delay: var(--enter-delay);
+  animation-fill-mode: both;
+  animation-timing-function: var(--motion-ease);
+  will-change: opacity, transform, filter;
+}
+
+.motion-enter--hero {
+  animation-name: motionHeroIn;
+}
+
+.motion-enter--panel {
+  animation-name: motionPanelIn;
+}
+
+.motion-enter--rise {
+  animation-name: motionRiseIn;
+}
+
+.motion-enter--soft {
+  animation-name: motionSoftIn;
+}
+
+.motion-enter--pop {
+  animation-name: motionPopIn;
+}
+
+.motion-exit {
+  opacity: 0 !important;
+  transform: translateY(-10px) scale(0.98);
+  filter: blur(6px);
+  pointer-events: none;
+  transition:
+    opacity 240ms ease,
+    transform 280ms var(--motion-ease),
+    filter 240ms ease;
 }
 
 .landing-page {
@@ -488,6 +529,14 @@ button {
     radial-gradient(circle at top right, rgba(12, 122, 105, 0.14), transparent 26%),
     linear-gradient(145deg, rgba(255, 252, 247, 0.98), rgba(246, 250, 248, 0.96));
   box-shadow: var(--shadow);
+}
+
+.settings-page:not(.hidden) .settings-backdrop {
+  animation: overlayFadeIn 240ms ease both;
+}
+
+.settings-page:not(.hidden) .settings-panel {
+  animation: modalPanelIn 420ms var(--motion-ease) both;
 }
 
 .settings-header {
@@ -1273,7 +1322,6 @@ button {
 .inline-thread {
   display: block;
   margin: 16px 0 18px;
-  animation: inlineThreadReveal 240ms cubic-bezier(0.22, 1, 0.36, 1);
   transform-origin: top left;
 }
 
@@ -1434,6 +1482,104 @@ button {
   to {
     opacity: 1;
     transform: translateY(0) scaleY(1);
+  }
+}
+
+@keyframes motionHeroIn {
+  from {
+    opacity: 0;
+    transform: translateY(34px) scale(0.96);
+    filter: blur(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes motionPanelIn {
+  from {
+    opacity: 0;
+    transform: translateY(22px) scale(0.985);
+    filter: blur(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes motionRiseIn {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+    filter: blur(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes motionSoftIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes motionPopIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.94);
+    filter: blur(8px);
+  }
+
+  68% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1.015);
+    filter: blur(0);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes overlayFadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes modalPanelIn {
+  from {
+    opacity: 0;
+    transform: translateY(24px) scale(0.96);
+    filter: blur(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
   }
 }
 
@@ -1669,6 +1815,21 @@ button {
   40% {
     transform: translateY(-3px);
     opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-enter,
+  .settings-page:not(.hidden) .settings-backdrop,
+  .settings-page:not(.hidden) .settings-panel {
+    animation: none !important;
+  }
+
+  .motion-exit {
+    opacity: 0 !important;
+    filter: none;
+    transform: none;
+    transition: opacity 120ms linear;
   }
 }
 
