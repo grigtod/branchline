@@ -1,14 +1,13 @@
-# SleekLLM
+![AI Arcade header](./public/branchline-logo-gradient.png)
 
-A lightweight browser app for chatting with OpenAI models in a clean, branching interface.
+A lightweight browser app for chatting with LLM models in a clean, branching interface.
 
 ## What it does
 
 - Lets you paste an OpenAI API key into a password-style field
 - Lets you pick a model and thinking level before chatting
-- Saves conversations in a left sidebar similar to ChatGPT
-- Lets you highlight any assistant response text and open a focused side thread on that exact span
-- Supports nested side threads while keeping the full main conversation as context
+- Saves conversations in a left sidebar
+- Lets you highlight any assistant response text and open a menu with advanced features: Compact, Branch, Debate, Analyse, Favourite
 
 ## Run it
 
