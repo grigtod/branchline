@@ -2,9 +2,9 @@
 
 A lightweight browser app for chatting with LLM models in a clean, branching interface.
 
-Video: [link](https://youtu.be/up_wG7gcTvY)  
-Demo: [link](https://grigtod.github.io/branchline/)
-Photos: [link](https://drive.google.com/drive/folders/1rQ_os_vhJbZnVsV1hQ5KLNNrPEiXMqyE)  
+- Video: [link](https://youtu.be/up_wG7gcTvY)  
+- Demo: [link](https://grigtod.github.io/branchline/)
+- Photos: [link](https://drive.google.com/drive/folders/1rQ_os_vhJbZnVsV1hQ5KLNNrPEiXMqyE)  
 
 ## What it does
 
