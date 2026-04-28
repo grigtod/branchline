@@ -81,7 +81,6 @@ const ui = {
   hoveredTooltipButton: null,
   toastTimers: [],
   toasts: [],
-  motionEnabled: true,
   landingEntrancePending: ENABLE_LANDING_PAGE,
   appShellEntrancePending: !ENABLE_LANDING_PAGE,
   activeConversationMotionPending: !ENABLE_LANDING_PAGE,
@@ -99,27 +98,8 @@ let state = loadState();
 init();
 
 function init() {
-  initMotionPreference();
   bindEvents();
   render();
-}
-
-function initMotionPreference() {
-  const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-  ui.motionEnabled = !mediaQuery.matches;
-
-  const handleChange = (event) => {
-    ui.motionEnabled = !event.matches;
-  };
-
-  if (typeof mediaQuery.addEventListener === "function") {
-    mediaQuery.addEventListener("change", handleChange);
-    return;
-  }
-
-  if (typeof mediaQuery.addListener === "function") {
-    mediaQuery.addListener(handleChange);
-  }
 }
 
 function bindEvents() {
@@ -1971,7 +1951,7 @@ function renderToasts() {
 }
 
 function markForEnter(element, order = 0, variant = "rise") {
-  if (!ui.motionEnabled || !element) {
+  if (!element) {
     return;
   }
 
@@ -1989,7 +1969,7 @@ function maybeAnimateTrackedEntry(element, key, previousSet, variant = "rise", o
 }
 
 function animateElementOut(element) {
-  if (!ui.motionEnabled || !element) {
+  if (!element) {
     return Promise.resolve();
   }
 

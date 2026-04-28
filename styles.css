@@ -1818,21 +1818,6 @@ button {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .motion-enter,
-  .settings-page:not(.hidden) .settings-backdrop,
-  .settings-page:not(.hidden) .settings-panel {
-    animation: none !important;
-  }
-
-  .motion-exit {
-    opacity: 0 !important;
-    filter: none;
-    transform: none;
-    transition: opacity 120ms linear;
-  }
-}
-
 @media (max-width: 1120px) {
   .app-shell {
     grid-template-columns: 1fr;
